@@ -4,6 +4,14 @@
   "description": "Figma plugin: inspect selection tree, serialize layout/styles, smart image bake, export JSON/HTML/ZIP",
   "license": "MIT",
   "author": "杜豪",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dhsbm/figma-node-inspector.git"
+  },
+  "homepage": "https://github.com/dhsbm/figma-node-inspector#readme",
+  "bugs": {
+    "url": "https://github.com/dhsbm/figma-node-inspector/issues"
+  },
   "keywords": [
     "figma",
     "figma-plugin",
