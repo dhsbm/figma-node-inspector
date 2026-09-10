@@ -1,0 +1,20 @@
+# Dependencies & build
+node_modules/
+dist/
+release/
+
+# Local runtime / exports
+temp/
+*.log
+.DS_Store
+*.png
+!docs/assets/**/*.png
+!docs/assets/**/*.jpg
+!docs/assets/**/*.jpeg
+!docs/assets/**/*.webp
+!docs/assets/**/*.gif
+
+# IDE / local tool config
+.cursor/
+.codex/
+.vscode/

@@ -1,0 +1,27 @@
+{
+  "name": "figma-node-inspector",
+  "version": "1.0.0",
+  "description": "Figma plugin: inspect selection tree, serialize layout/styles, smart image bake, export JSON/HTML/ZIP",
+  "license": "MIT",
+  "author": "杜豪",
+  "keywords": [
+    "figma",
+    "figma-plugin",
+    "design-to-code",
+    "typescript",
+    "html-export"
+  ],
+  "scripts": {
+    "build": "esbuild code.ts --bundle --outfile=code.js --target=es2017 && node scripts/build-ui.mjs",
+    "watch": "esbuild code.ts --bundle --outfile=code.js --target=es2017 --watch",
+    "build:ui": "node scripts/build-ui.mjs",
+    "pack": "npm run build && node scripts/pack-plugin.mjs",
+    "generate:html": "node scripts/generate-html.mjs",
+    "docs:json-schema": "node -e \"import {getNodeJsonSchemaDoc,getNodeJsonSchemaDocFilename} from './scripts/lib/node-json-schema-doc.mjs'; import fs from 'fs'; fs.mkdirSync('docs',{recursive:true}); const f='docs/'+getNodeJsonSchemaDocFilename('node-json'); fs.writeFileSync(f, getNodeJsonSchemaDoc()); console.log('wrote', f)\""
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.109.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  }
+}
