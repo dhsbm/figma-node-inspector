@@ -4,7 +4,8 @@ Figma 插件：读取画布**所选节点**的完整层级与样式，在面板�
 
 > Design → 结构化数据 → 可预览 HTML，覆盖自动切图、资源去重与常见 CSS 还原难点。
 
-**License:** [MIT](./LICENSE)
+**Figma Community：** [安装 Node Inspector](https://www.figma.com/community/plugin/1679772014017499667/Node-Inspector)  
+**License：** [MIT](./LICENSE)
 
 ---
 
@@ -48,22 +49,15 @@ Figma 插件：读取画布**所选节点**的完整层级与样式，在面板�
 
 ## 快速开始
 
-### 直接使用（无需改代码）
+### 从 Figma Community 安装（推荐）
 
-仓库已包含构建产物 `code.js` / `ui.html`。
-
-1. Figma Desktop → Plugins → Development → **Import plugin from manifest…**
-2. 选择本仓库根目录的 `manifest.json`
+1. 打开 [Node Inspector · Community](https://www.figma.com/community/plugin/1679772014017499667/Node-Inspector)
+2. 点击 **Open in…** / 保存到文件后运行
 3. 选中画布节点 → 运行 **Node Inspector**
 
-或打包分发：
+### 从源码开发 / 本地加载
 
-```bash
-npm run pack
-# → release/plugin/ 与 release/node-inspector-plugin-v*.zip
-```
-
-### 二次开发
+仓库已包含构建产物 `code.js` / `ui.html`。
 
 ```bash
 npm install
@@ -71,6 +65,15 @@ npm run build
 ```
 
 `npm run build` 编译 `code.ts` → `code.js`，并把导出模块注入 `ui.html`。
+
+**Development 加载：** Plugins → Development → **Import plugin from manifest…** → 选择本仓库根目录 `manifest.json`。
+
+组内离线分发：
+
+```bash
+npm run pack
+# → release/plugin/ 与 release/node-inspector-plugin-v*.zip
+```
 
 ---
 

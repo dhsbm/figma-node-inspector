@@ -326,8 +326,14 @@ export function generateHtmlDocument(data, options = {}) {
       const fromCb = svgSrcForId(node.id)
       if (fromCb) return fromCb
     }
-    if (node.svgRef && rawSvgs[node.svgRef]?.path) {
-      return rawSvgs[node.svgRef].path
+    if (!node.svgRef || !rawSvgs[node.svgRef]) return null
+    const asset = rawSvgs[node.svgRef]
+    if (asset.path) return asset.path
+    // inspect 池：内联 source → data URL（与 ZIP 外置 path 二选一）
+    if (typeof asset.source === 'string' && asset.source) {
+      return (
+        'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(asset.source)
+      )
     }
     return null
   }
@@ -341,6 +347,7 @@ export function generateHtmlDocument(data, options = {}) {
     resolveGoogleFontImports,
     googleFontsLinkFromImports,
     renderTextHtmlContent,
+    shouldPreferCssBlurGradient,
   } = createFigmaLayout(imagesForLayout)
 
   // 列表只做识别标注；不改写各节点 layout / 视觉样式
@@ -373,7 +380,15 @@ export function generateHtmlDocument(data, options = {}) {
     const slotMap = listItemRoot ? itemSlotMaps.get(listItemRoot) : null
     const slot = slotMap?.[node.id]
 
-    const style = buildStyle(node, {isRoot, parent, parentAutoLayout})
+    const styleResult = buildStyle(node, {isRoot, parent, parentAutoLayout})
+    const style =
+      typeof styleResult === 'string' ? styleResult : styleResult.css
+    const isolatedFilter =
+      typeof styleResult === 'string' ? null : styleResult.isolatedFilter
+    const strokeOverlay =
+      typeof styleResult === 'string' ? null : styleResult.strokeOverlay
+    const gradientBorderMask =
+      typeof styleResult === 'string' ? null : styleResult.gradientBorderMask
     const cls = classNameFor(node)
     let attrs = [
       `class="${cls}"`,
@@ -400,26 +415,67 @@ export function generateHtmlDocument(data, options = {}) {
 
     const warnPrefix = htmlLayoutWarningComment(node, esc)
 
-    const pngSrc =
-      (typeof vectorSrcForId === 'function' && vectorSrcForId(node.id)) ||
-      (imageMode === 'inline' ? resolveNodePng(node, rawImages) : null)
+    function isolatedInnerStyle(extra = '') {
+      // img/svg 保持原盒；blur 本身会画出盒外。勿放大，否则 object-fit 会拉伸切图。
+      const parts = [
+        'position:absolute',
+        'inset:0',
+        'width:100%',
+        'height:100%',
+        `filter:${isolatedFilter}`,
+      ]
+      if (extra) parts.push(extra)
+      return parts.join(';')
+    }
+
+    const preferCssGlow =
+      typeof shouldPreferCssBlurGradient === 'function' &&
+      shouldPreferCssBlurGradient(node)
+    const pngSrc = preferCssGlow
+      ? null
+      : (typeof vectorSrcForId === 'function' && vectorSrcForId(node.id)) ||
+        (imageMode === 'inline' ? resolveNodePng(node, rawImages) : null)
     if (pngSrc) {
+      if (isolatedFilter) {
+        // 外层承担定位 / opacity / mix-blend；img 只负责像素与 blur
+        const wrapStyle = /overflow\s*:/.test(style)
+          ? style
+          : `${style};overflow:visible`
+        const wrapAttrs = [
+          `class="${cls}"`,
+          `data-name="${esc(node.name)}"`,
+          `data-type="${esc(node.type)}"`,
+          `style="${esc(wrapStyle)}"`,
+        ]
+        return `${warnPrefix}<div ${wrapAttrs.join(' ')}><img style="${esc(isolatedInnerStyle('display:block;object-fit:fill;border:0;padding:0;margin:0'))}" src="${esc(pngSrc)}" alt="" /></div>`
+      }
       return `${warnPrefix}<img ${attrs.join(' ')} src="${esc(pngSrc)}" alt="" />`
     }
 
     const svgFileSrc = resolveNodeSvgSrc(node)
     if (svgFileSrc) {
+      if (isolatedFilter) {
+        const wrapAttrs = [
+          `class="${cls}"`,
+          `data-name="${esc(node.name)}"`,
+          `data-type="${esc(node.type)}"`,
+          `style="${esc(style)}"`,
+        ]
+        return `${warnPrefix}<div ${wrapAttrs.join(' ')}><img style="${esc(isolatedInnerStyle('display:block;object-fit:fill;border:0;padding:0;margin:0'))}" src="${esc(svgFileSrc)}" alt="" /></div>`
+      }
       return `${warnPrefix}<img ${attrs.join(' ')} src="${esc(svgFileSrc)}" alt="" />`
     }
 
     if (node.svg) {
-      const svgStyle = esc(`${style};display:block`)
       const svgClass =
         attrs.find((a) => a.startsWith('class="'))?.slice(7, -1) || cls
-      let svgOpen = `class="${svgClass}" data-name="${esc(node.name)}" data-type="${esc(node.type)}" style="${svgStyle}"`
+      let svgOpen = `class="${svgClass}" data-name="${esc(node.name)}" data-type="${esc(node.type)}" style="${esc(`${style};display:block`)}"`
       if (node.htmlLayoutWarning) {
         svgOpen += ` data-html-layout-warning="${esc(node.htmlLayoutWarning.kind)}"`
         svgOpen += ' data-html-supported="false"'
+      }
+      if (isolatedFilter) {
+        return `${warnPrefix}<div class="${cls}" data-name="${esc(node.name)}" data-type="${esc(node.type)}" style="${esc(style)}">${node.svg.replace(/<svg\b/, `<svg style="${esc(isolatedInnerStyle('display:block'))}"`)}</div>`
       }
       return (
         warnPrefix + node.svg.replace(/<svg\b/, `<svg ${svgOpen}`)
@@ -441,7 +497,87 @@ export function generateHtmlDocument(data, options = {}) {
         .join('\n')
     }
 
+    if (strokeOverlay && strokeOverlay.color) {
+      const w = strokeOverlay.width || 1
+      const c = strokeOverlay.color
+      let lineStyle = 'position:absolute;pointer-events:none;z-index:2;'
+      if (strokeOverlay.side === 'bottom') {
+        lineStyle += `left:0;right:0;bottom:0;height:${w}px;background:${c}`
+      } else if (strokeOverlay.side === 'top') {
+        lineStyle += `left:0;right:0;top:0;height:${w}px;background:${c}`
+      } else if (strokeOverlay.side === 'left') {
+        lineStyle += `top:0;bottom:0;left:0;width:${w}px;background:${c}`
+      } else if (strokeOverlay.side === 'right') {
+        lineStyle += `top:0;bottom:0;right:0;width:${w}px;background:${c}`
+      }
+      inner += `<div aria-hidden="true" data-stroke-overlay="${esc(strokeOverlay.side)}" style="${esc(lineStyle)}"></div>`
+    }
+
+    if (gradientBorderMask?.gradient) {
+      const bw = gradientBorderMask.width || 1
+      const blend =
+        gradientBorderMask.blendMode === 'LINEAR_DODGE' ||
+        gradientBorderMask.blendMode === 'ADD'
+          ? 'mix-blend-mode:plus-lighter;'
+          : ''
+      const maskStyle = [
+        'position:absolute',
+        'inset:0',
+        'border-radius:inherit',
+        `padding:${bw}px`,
+        `background:${gradientBorderMask.gradient}`,
+        '-webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0)',
+        '-webkit-mask-composite:xor',
+        'mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0)',
+        'mask-composite:exclude',
+        'pointer-events:none',
+        'z-index:3',
+        blend.slice(0, -1),
+      ]
+        .filter(Boolean)
+        .join(';')
+      inner += `<div aria-hidden="true" data-gradient-border="true" style="${esc(maskStyle)}"></div>`
+    }
+
     const tag = node.type === 'TEXT' ? textTagName(node) : 'div'
+
+    // 纯色/渐变光效：把 background* 挪到内层再 blur，外层保留 mix-blend
+    if (isolatedFilter && tag === 'div' && !inner) {
+      const bgProps = []
+      const outerProps = []
+      for (const part of style.split(';').filter(Boolean)) {
+        const key = part.split(':')[0].trim()
+        if (
+          key === 'background' ||
+          key === 'background-image' ||
+          key === 'background-size' ||
+          key === 'background-position' ||
+          key === 'background-repeat' ||
+          key === 'background-clip' ||
+          key === 'background-origin' ||
+          key === 'border-radius'
+        ) {
+          bgProps.push(part)
+        } else {
+          outerProps.push(part)
+        }
+      }
+      // blur 会画出盒外；保持内层原尺寸，勿放大填充区（否则光团会鼓成一大片）
+      if (!outerProps.some((p) => p.startsWith('overflow:'))) {
+        outerProps.push('overflow:visible')
+      }
+      const outerStyle = outerProps.join(';')
+      const innerStyle = [
+        'position:absolute',
+        'inset:0',
+        'width:100%',
+        'height:100%',
+        `filter:${isolatedFilter}`,
+        ...bgProps,
+      ].join(';')
+      return `${warnPrefix}<div class="${cls}" data-name="${esc(node.name)}" data-type="${esc(node.type)}" style="${esc(outerStyle)}"><div style="${esc(innerStyle)}"></div></div>`
+    }
+
     return `${warnPrefix}<${tag} ${attrs.join(' ')}>${inner}</${tag}>`
   }
 

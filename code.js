@@ -178,6 +178,25 @@
     }
     return Math.max(MIN_FONT_WEIGHT, Math.round(weight));
   }
+  var MAX_EXPORT_CONCURRENCY = 2;
+  var exportSlots = MAX_EXPORT_CONCURRENCY;
+  var exportWaitQueue = [];
+  async function withExportSlot(run) {
+    if (exportSlots <= 0) {
+      await new Promise((resolve) => {
+        exportWaitQueue.push(resolve);
+      });
+    }
+    exportSlots -= 1;
+    try {
+      return await run();
+    } finally {
+      exportSlots += 1;
+      const next = exportWaitQueue.shift();
+      if (next) next();
+    }
+  }
+  var RESULT_PAYLOAD_CHUNK_CHARS = 512 * 1024;
   var SVG_NODE_TYPES = /* @__PURE__ */ new Set([
     "VECTOR",
     "BOOLEAN_OPERATION",
@@ -656,7 +675,19 @@
     if ("strokes" in node) {
       styles.strokes = node.strokes.map(serializePaint);
     }
-    if ("strokeWeight" in node) styles.strokeWeight = node.strokeWeight;
+    if ("strokeWeight" in node) {
+      if (node.strokeWeight === figma.mixed) {
+        const sides = node;
+        if (typeof sides.strokeTopWeight === "number") {
+          styles.strokeTopWeight = sides.strokeTopWeight;
+          styles.strokeRightWeight = sides.strokeRightWeight;
+          styles.strokeBottomWeight = sides.strokeBottomWeight;
+          styles.strokeLeftWeight = sides.strokeLeftWeight;
+        }
+      } else if (typeof node.strokeWeight === "number") {
+        styles.strokeWeight = node.strokeWeight;
+      }
+    }
     if ("strokeAlign" in node) styles.strokeAlign = node.strokeAlign;
     if ("dashPattern" in node && node.dashPattern.length > 0) {
       styles.strokeDashes = node.dashPattern;
@@ -830,10 +861,12 @@
     try {
       const safeScale = clampImageScale(scale);
       const options = safeScale !== 1 ? { format: "PNG", constraint: { type: "SCALE", value: safeScale } } : { format: "PNG" };
-      const bytes = await withNodeEffectsCleared(
-        node,
-        () => node.exportAsync(options),
-        { keepInnerShadow: true }
+      const bytes = await withExportSlot(
+        () => withNodeEffectsCleared(
+          node,
+          () => node.exportAsync(options),
+          { keepInnerShadow: true }
+        )
       );
       const pixel = readPngPixelSize(bytes);
       return {
@@ -1007,20 +1040,23 @@
   }
   async function exportNodeVectorAssets(node, pageWidth) {
     const result = {};
-    try {
-      result.svg = await withNodeEffectsCleared(
-        node,
-        () => node.exportAsync({ format: "SVG_STRING" })
-      );
-    } catch (error) {
-      result.svgError = error instanceof Error ? error.message : String(error);
-    }
     const png = await exportNodePngForInspect(node, pageWidth);
     if (png.png) result.png = png.png;
     if (png.pngError) result.pngError = png.pngError;
     if (png.pngByteLength) result.pngByteLength = png.pngByteLength;
     if (png.pngDesignSize) result.pngDesignSize = png.pngDesignSize;
     if (png.pngVisualBounds) result.pngVisualBounds = png.pngVisualBounds;
+    if (result.png) return result;
+    try {
+      result.svg = await withExportSlot(
+        () => withNodeEffectsCleared(
+          node,
+          () => node.exportAsync({ format: "SVG_STRING" })
+        )
+      );
+    } catch (error) {
+      result.svgError = error instanceof Error ? error.message : String(error);
+    }
     return result;
   }
   async function serializeNode(node, options = {}) {
@@ -1279,6 +1315,56 @@
     return merged;
   }
   var VECTOR_IMAGE_PREFIX = "v:";
+  var SVG_ASSET_PREFIX = "s:";
+  function stripRedundantSvg(nodes) {
+    const walk = (list) => {
+      for (const node of list) {
+        if ((node.png || node.pngRef) && node.svg) {
+          delete node.svg;
+        }
+        if (node.children) walk(node.children);
+      }
+    };
+    walk(nodes);
+  }
+  function poolSvgAssets(nodes, svgs) {
+    let refs = 0;
+    const walk = (list) => {
+      for (const node of list) {
+        if (node.visible === false) {
+          if (node.children) walk(node.children);
+          continue;
+        }
+        if (typeof node.svg === "string" && node.svg.trim()) {
+          refs += 1;
+          const bytes = encodeUtf8(node.svg);
+          const contentHash = hashBytes(bytes);
+          const key = `${SVG_ASSET_PREFIX}${contentHash}`;
+          const existing = svgs[key];
+          if (existing) {
+            existing.refCount = (existing.refCount || 1) + 1;
+          } else {
+            svgs[key] = {
+              mime: "image/svg+xml",
+              source: node.svg,
+              byteLength: bytes.length,
+              contentHash,
+              origin: "vector",
+              refCount: 1
+            };
+          }
+          node.svgRef = key;
+          delete node.svg;
+        }
+        if (node.children) walk(node.children);
+      }
+    };
+    walk(nodes);
+    return {
+      refs,
+      unique: Object.keys(svgs).length
+    };
+  }
   function poolVectorPngAssets(nodes, images) {
     let refs = 0;
     const walk = (list) => {
@@ -1412,19 +1498,20 @@
   function bytesToBase64(bytes) {
     return figma.base64Encode(bytes);
   }
-  async function exportImagesByHash(hashes, onProgress) {
-    const images = {};
+  async function exportImagesByHash(hashes, onProgress, into = {}) {
+    const images = into;
     const total = hashes.length;
     for (let i = 0; i < hashes.length; i++) {
       const hash = hashes[i];
       onProgress == null ? void 0 : onProgress(i + 1, total);
+      if (images[hash]) continue;
       try {
         const image = figma.getImageByHash(hash);
         if (!image) {
           images[hash] = { error: "image not found for hash" };
           continue;
         }
-        const bytes = await image.getBytesAsync();
+        const bytes = await withExportSlot(() => image.getBytesAsync());
         const mime = detectImageMime(bytes);
         const base64 = bytesToBase64(bytes);
         images[hash] = {
@@ -1439,6 +1526,35 @@
       }
     }
     return images;
+  }
+  async function postResultPayload(payload, generation) {
+    if (generation !== inspectGeneration) return;
+    if (payload.length <= RESULT_PAYLOAD_CHUNK_CHARS) {
+      figma.ui.postMessage({ type: "result", payload });
+      return;
+    }
+    const id = `r-${generation}-${Date.now()}`;
+    const total = Math.ceil(payload.length / RESULT_PAYLOAD_CHUNK_CHARS);
+    figma.ui.postMessage({
+      type: "result-start",
+      id,
+      total,
+      chars: payload.length
+    });
+    for (let i = 0; i < total; i++) {
+      if (generation !== inspectGeneration) return;
+      const start = i * RESULT_PAYLOAD_CHUNK_CHARS;
+      figma.ui.postMessage({
+        type: "result-chunk",
+        id,
+        index: i,
+        total,
+        chunk: payload.slice(start, start + RESULT_PAYLOAD_CHUNK_CHARS)
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    if (generation !== inspectGeneration) return;
+    figma.ui.postMessage({ type: "result-end", id });
   }
   var inspectGeneration = 0;
   var inspectedRootIds = [];
@@ -1656,20 +1772,33 @@
         return;
       }
       getInspectScratchPage();
+      const rootTotal = selection.length;
       figma.ui.postMessage({
         type: "loading",
-        message: `\u6B63\u5728\u8BFB\u53D6 ${selection.map((n) => n.name).join(", ")}\uFF08\u77E2\u91CF SVG+PNG\uFF09\u2026`,
-        selectedCount: selection.length
+        message: rootTotal > 1 ? `\u6B63\u5728\u8BFB\u53D6 0/${rootTotal} \u4E2A\u6839\u8282\u70B9\u2026` : `\u6B63\u5728\u8BFB\u53D6 ${selection[0].name}\u2026`,
+        selectedCount: rootTotal
       });
       const nodes = [];
-      for (const node of selection) {
+      const images = {};
+      const svgs = {};
+      let vectorPngRefs = 0;
+      for (let i = 0; i < selection.length; i++) {
+        if (generation !== inspectGeneration) return;
+        const node = selection[i];
+        figma.ui.postMessage({
+          type: "loading",
+          message: rootTotal > 1 ? `\u6B63\u5728\u8BFB\u53D6 ${i + 1}/${rootTotal}\uFF1A${node.name}\u2026` : `\u6B63\u5728\u8BFB\u53D6 ${node.name}\u2026`,
+          selectedCount: rootTotal
+        });
         const pageWidth = getNodeLayoutWidth(node) || 375;
         const serialized = await serializeNode(node, { pageWidth });
-        if (serialized) {
-          attachRootRelativeCoords(serialized);
-          nodes.push(serialized);
-        }
-        if (generation !== inspectGeneration) return;
+        if (!serialized) continue;
+        attachRootRelativeCoords(serialized);
+        stripRedundantSvg([serialized]);
+        const vectorPool = poolVectorPngAssets([serialized], images);
+        vectorPngRefs += vectorPool.refs;
+        poolSvgAssets([serialized], svgs);
+        nodes.push(serialized);
       }
       if (nodes.length === 0) {
         if (generation !== inspectGeneration) return;
@@ -1682,7 +1811,6 @@
       }
       inspectedRootIds = nodes.map((n) => n.id);
       const hashes = Array.from(collectImageHashes(nodes));
-      let images = {};
       if (hashes.length > 0) {
         if (generation !== inspectGeneration) return;
         figma.ui.postMessage({
@@ -1690,19 +1818,22 @@
           message: `\u6B63\u5728\u5BFC\u51FA\u56FE\u7247 0/${hashes.length}\u2026`,
           selectedCount: selection.length
         });
-        images = await exportImagesByHash(hashes, (done, total) => {
-          if (generation !== inspectGeneration) return;
-          figma.ui.postMessage({
-            type: "loading",
-            message: `\u6B63\u5728\u5BFC\u51FA\u56FE\u7247 ${done}/${total}\u2026`,
-            selectedCount: selection.length
-          });
-        });
+        await exportImagesByHash(
+          hashes,
+          (done, total) => {
+            if (generation !== inspectGeneration) return;
+            figma.ui.postMessage({
+              type: "loading",
+              message: `\u6B63\u5728\u5BFC\u51FA\u56FE\u7247 ${done}/${total}\u2026`,
+              selectedCount: selection.length
+            });
+          },
+          images
+        );
       }
       const fillRefs = countImageFillReferences(nodes);
       applyImageRefCounts(images, fillRefs.perHash);
       const mergedFillDupes = dedupeImagesByContent(images);
-      const vectorPool = poolVectorPngAssets(nodes, images);
       if (generation !== inspectGeneration) return;
       const totalCount = countNodes(nodes);
       const svgStats = countSvgNodes(nodes);
@@ -1711,6 +1842,9 @@
       const imageUniqueCount = countUniqueImageAssets(images);
       const exportAsImageCount = countExportAsImageNodes(nodes);
       const htmlLayoutWarnings = collectHtmlLayoutWarnings(nodes);
+      const vectorPngUniqueCount = Object.keys(images).filter(
+        (k) => k.startsWith(VECTOR_IMAGE_PREFIX)
+      ).length;
       const data = {
         page: figma.currentPage.name,
         selectedCount: selection.length,
@@ -1723,21 +1857,28 @@
         imageFillRefCount: fillRefs.total,
         imageFillUniqueCount: hashes.length - mergedFillDupes,
         imageMergedDuplicateCount: mergedFillDupes,
-        vectorPngRefCount: vectorPool.refs,
-        vectorPngUniqueCount: vectorPool.unique,
+        vectorPngRefCount: vectorPngRefs,
+        vectorPngUniqueCount,
         svgCount: svgStats.ok,
         svgErrorCount: svgStats.error,
+        svgAssetCount: Object.keys(svgs).length,
         pngCount: pngStats.ok,
         pngErrorCount: pngStats.error,
         exportAsImageCount,
         fontCount: fonts.length,
         fonts,
         images,
+        svgs,
         nodes
       };
-      const payload = JSON.stringify(data);
       if (generation !== inspectGeneration) return;
-      figma.ui.postMessage({ type: "result", payload });
+      figma.ui.postMessage({
+        type: "loading",
+        message: "\u6B63\u5728\u56DE\u4F20\u7ED3\u679C\u2026",
+        selectedCount: selection.length
+      });
+      const payload = JSON.stringify(data);
+      await postResultPayload(payload, generation);
     } catch (error) {
       if (generation !== inspectGeneration) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -1767,7 +1908,7 @@
     let ok = 0;
     let error = 0;
     for (const node of nodes) {
-      if (node.svg) ok += 1;
+      if (node.svg || node.svgRef) ok += 1;
       if (node.svgError) error += 1;
       if (node.children) {
         const nested = countSvgNodes(node.children);

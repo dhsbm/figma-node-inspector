@@ -88,12 +88,30 @@ function hashSvgContent(svg) {
 }
 
 /**
- * 将节点内联 svg 收进池；返回 {svgs, nodeIdToRef}。
+ * 将节点内联 svg / 已有 svgRef 收进池；返回 {svgs, nodeIdToRef}。
  * key 形如 s:<contentHash>。
+ * existingSvgs：inspect 阶段已池化的顶层 svgs（含 source），ZIP 侧复用。
  */
-function poolSvgAssets(nodes) {
+function poolSvgAssets(nodes, existingSvgs = null) {
   const svgs = {}
   const nodeIdToRef = {}
+
+  if (existingSvgs && typeof existingSvgs === 'object') {
+    for (const [key, asset] of Object.entries(existingSvgs)) {
+      if (!asset || typeof asset.source !== 'string' || !asset.source) continue
+      svgs[key] = {
+        mime: asset.mime || 'image/svg+xml',
+        source: asset.source,
+        byteLength:
+          typeof asset.byteLength === 'number'
+            ? asset.byteLength
+            : new TextEncoder().encode(asset.source).length,
+        contentHash: asset.contentHash || hashSvgContent(asset.source),
+        origin: asset.origin || 'vector',
+        refCount: 0,
+      }
+    }
+  }
 
   const walk = (list) => {
     for (const node of list || []) {
@@ -118,12 +136,22 @@ function poolSvgAssets(nodes) {
         nodeIdToRef[node.id] = key
       } else if (node.svgRef) {
         nodeIdToRef[node.id] = node.svgRef
+        const pooled = svgs[node.svgRef]
+        if (pooled) {
+          pooled.refCount = (pooled.refCount || 0) + 1
+        }
       }
       if (node.children?.length && !node.flattened) walk(node.children)
     }
   }
 
   walk(nodes)
+
+  // 去掉未被任何节点引用的种子条目
+  for (const key of Object.keys(svgs)) {
+    if (!(svgs[key].refCount > 0)) delete svgs[key]
+  }
+
   return {svgs, nodeIdToRef}
 }
 
@@ -764,7 +792,10 @@ async function buildZipEntriesForData(data, options = {}) {
   }
 
   const encoder = new TextEncoder()
-  const {svgs: svgPool, nodeIdToRef} = poolSvgAssets(data.nodes)
+  const {svgs: svgPool, nodeIdToRef} = poolSvgAssets(
+    data.nodes,
+    data.svgs || null,
+  )
   const svgEntries = Object.entries(svgPool)
   const svgRefToPath = {}
   let svgIndex = 0

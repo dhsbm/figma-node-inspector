@@ -41,7 +41,13 @@ function assertBuiltFiles() {
 function writeInstallNote(version) {
   return `# Node Inspector 插件（v${version}）
 
-## 安装（仅使用，无需 Node）
+## 安装
+
+### 推荐：Figma Community
+
+打开 https://www.figma.com/community/plugin/1679772014017499667/Node-Inspector 安装并运行。
+
+### 离线：Import from manifest
 
 1. 解压本 ZIP，得到 \`plugin\` 文件夹（或直接使用仓库里的 \`release/plugin\`）
 2. 打开 Figma Desktop

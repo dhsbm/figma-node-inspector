@@ -123,6 +123,43 @@ type ImageAsset =
       error: string
     }
 
+/** Inspect 阶段 SVG 池（与 ZIP 侧 s: 前缀一致） */
+type SvgAsset = {
+  mime: string
+  source: string
+  byteLength: number
+  contentHash: string
+  origin?: 'vector'
+  refCount?: number
+}
+
+/**
+ * 切图 / getBytes 并发上限。多根仍串行；单根内导出受此槽位约束，
+ * 避免瞬时 clone+exportAsync 把 Figma 进程打爆。
+ */
+const MAX_EXPORT_CONCURRENCY = 2
+let exportSlots = MAX_EXPORT_CONCURRENCY
+const exportWaitQueue: Array<() => void> = []
+
+async function withExportSlot<T>(run: () => Promise<T>): Promise<T> {
+  if (exportSlots <= 0) {
+    await new Promise<void>((resolve) => {
+      exportWaitQueue.push(resolve)
+    })
+  }
+  exportSlots -= 1
+  try {
+    return await run()
+  } finally {
+    exportSlots += 1
+    const next = exportWaitQueue.shift()
+    if (next) next()
+  }
+}
+
+/** 结果 JSON 分块大小（字符）；超过则 result-start/chunk/end */
+const RESULT_PAYLOAD_CHUNK_CHARS = 512 * 1024
+
 /**
  * 选区用到的字体元数据。
  * 约束：Plugin API 无法导出字体二进制（版权与接口限制），仅记录 family/style/weight；
@@ -496,6 +533,8 @@ type NodeInfo = {
   blendMode?: string
   clipsContent?: boolean
   svg?: string
+  /** 去重后指向顶层 svgs 的 key（如 s:a1b2c3d4） */
+  svgRef?: string
   svgError?: string
   /** 矢量节点栅格化 PNG（Data URL），HTML 生成优先使用 */
   png?: string
@@ -575,7 +614,12 @@ type NodeInfo = {
   styles: {
     fills?: SerializedPaint[]
     strokes?: SerializedPaint[]
-    strokeWeight?: number | PluginAPI['mixed']
+    strokeWeight?: number
+    /** strokeWeight 为 mixed 时的单边描边（列表分割线等） */
+    strokeTopWeight?: number
+    strokeRightWeight?: number
+    strokeBottomWeight?: number
+    strokeLeftWeight?: number
     strokeAlign?: string
     strokeDashes?: ReadonlyArray<number>
     cornerRadius?: number | PluginAPI['mixed']
@@ -1014,7 +1058,25 @@ async function getStylesInfo(node: SceneNode): Promise<NodeInfo['styles']> {
   if ('strokes' in node) {
     styles.strokes = (node.strokes as readonly Paint[]).map(serializePaint)
   }
-  if ('strokeWeight' in node) styles.strokeWeight = node.strokeWeight
+  if ('strokeWeight' in node) {
+    if (node.strokeWeight === figma.mixed) {
+      // JSON 无法序列化 mixed symbol；改为导出四边宽度
+      const sides = node as SceneNode & {
+        strokeTopWeight?: number
+        strokeRightWeight?: number
+        strokeBottomWeight?: number
+        strokeLeftWeight?: number
+      }
+      if (typeof sides.strokeTopWeight === 'number') {
+        styles.strokeTopWeight = sides.strokeTopWeight
+        styles.strokeRightWeight = sides.strokeRightWeight
+        styles.strokeBottomWeight = sides.strokeBottomWeight
+        styles.strokeLeftWeight = sides.strokeLeftWeight
+      }
+    } else if (typeof node.strokeWeight === 'number') {
+      styles.strokeWeight = node.strokeWeight
+    }
+  }
   if ('strokeAlign' in node) styles.strokeAlign = node.strokeAlign
   if ('dashPattern' in node && node.dashPattern.length > 0) {
     styles.strokeDashes = node.dashPattern
@@ -1257,10 +1319,12 @@ async function exportNodePng(
       safeScale !== 1
         ? {format: 'PNG', constraint: {type: 'SCALE', value: safeScale}}
         : {format: 'PNG'}
-    const bytes = await withNodeEffectsCleared(
-      node,
-      () => node.exportAsync(options),
-      {keepInnerShadow: true},
+    const bytes = await withExportSlot(() =>
+      withNodeEffectsCleared(
+        node,
+        () => node.exportAsync(options),
+        {keepInnerShadow: true},
+      ),
     )
     const pixel = readPngPixelSize(bytes)
     return {
@@ -1539,20 +1603,25 @@ async function exportNodeVectorAssets(
     svgError?: string
   } = {}
 
-  try {
-    result.svg = await withNodeEffectsCleared(node, () =>
-      node.exportAsync({format: 'SVG_STRING'}),
-    )
-  } catch (error) {
-    result.svgError = error instanceof Error ? error.message : String(error)
-  }
-
+  // HTML 优先 PNG；PNG 成功则不再导出 SVG，避免双份体积撑爆内存
   const png = await exportNodePngForInspect(node, pageWidth)
   if (png.png) result.png = png.png
   if (png.pngError) result.pngError = png.pngError
   if (png.pngByteLength) result.pngByteLength = png.pngByteLength
   if (png.pngDesignSize) result.pngDesignSize = png.pngDesignSize
   if (png.pngVisualBounds) result.pngVisualBounds = png.pngVisualBounds
+
+  if (result.png) return result
+
+  try {
+    result.svg = await withExportSlot(() =>
+      withNodeEffectsCleared(node, () =>
+        node.exportAsync({format: 'SVG_STRING'}),
+      ),
+    )
+  } catch (error) {
+    result.svgError = error instanceof Error ? error.message : String(error)
+  }
 
   return result
 }
@@ -1893,6 +1962,70 @@ function dedupeImagesByContent(images: Record<string, ImageAsset>): number {
 }
 
 const VECTOR_IMAGE_PREFIX = 'v:'
+const SVG_ASSET_PREFIX = 's:'
+
+/**
+ * 已有 PNG 时丢掉内联 SVG（HTML 只用 PNG）。
+ * 在池化前调用，避免冗余字符串进入 payload。
+ */
+function stripRedundantSvg(nodes: NodeInfo[]): void {
+  const walk = (list: NodeInfo[]) => {
+    for (const node of list) {
+      if ((node.png || node.pngRef) && node.svg) {
+        delete node.svg
+      }
+      if (node.children) walk(node.children)
+    }
+  }
+  walk(nodes)
+}
+
+/**
+ * 内联 svg → 顶层 svgs 池 + svgRef（与 ZIP 侧 s:<hash> 约定一致）。
+ */
+function poolSvgAssets(
+  nodes: NodeInfo[],
+  svgs: Record<string, SvgAsset>,
+): {refs: number; unique: number} {
+  let refs = 0
+
+  const walk = (list: NodeInfo[]) => {
+    for (const node of list) {
+      if (node.visible === false) {
+        if (node.children) walk(node.children)
+        continue
+      }
+      if (typeof node.svg === 'string' && node.svg.trim()) {
+        refs += 1
+        const bytes = encodeUtf8(node.svg)
+        const contentHash = hashBytes(bytes)
+        const key = `${SVG_ASSET_PREFIX}${contentHash}`
+        const existing = svgs[key]
+        if (existing) {
+          existing.refCount = (existing.refCount || 1) + 1
+        } else {
+          svgs[key] = {
+            mime: 'image/svg+xml',
+            source: node.svg,
+            byteLength: bytes.length,
+            contentHash,
+            origin: 'vector',
+            refCount: 1,
+          }
+        }
+        node.svgRef = key
+        delete node.svg
+      }
+      if (node.children) walk(node.children)
+    }
+  }
+
+  walk(nodes)
+  return {
+    refs,
+    unique: Object.keys(svgs).length,
+  }
+}
 
 /**
  * 矢量/标记 PNG 写入 images 池；节点只保留 pngRef。
@@ -2110,20 +2243,22 @@ function bytesToBase64(bytes: Uint8Array): string {
 async function exportImagesByHash(
   hashes: string[],
   onProgress?: (done: number, total: number) => void,
+  into: Record<string, ImageAsset> = {},
 ): Promise<Record<string, ImageAsset>> {
-  const images: Record<string, ImageAsset> = {}
+  const images = into
   const total = hashes.length
 
   for (let i = 0; i < hashes.length; i++) {
     const hash = hashes[i]
     onProgress?.(i + 1, total)
+    if (images[hash]) continue
     try {
       const image = figma.getImageByHash(hash)
       if (!image) {
         images[hash] = {error: 'image not found for hash'}
         continue
       }
-      const bytes = await image.getBytesAsync()
+      const bytes = await withExportSlot(() => image.getBytesAsync())
       const mime = detectImageMime(bytes)
       const base64 = bytesToBase64(bytes)
       images[hash] = {
@@ -2139,6 +2274,47 @@ async function exportImagesByHash(
   }
 
   return images
+}
+
+/**
+ * 大 JSON 分块 postMessage，避免单帧超大 structured clone / 桥接缓冲把标签页打崩。
+ */
+async function postResultPayload(
+  payload: string,
+  generation: number,
+): Promise<void> {
+  if (generation !== inspectGeneration) return
+
+  if (payload.length <= RESULT_PAYLOAD_CHUNK_CHARS) {
+    figma.ui.postMessage({type: 'result', payload})
+    return
+  }
+
+  const id = `r-${generation}-${Date.now()}`
+  const total = Math.ceil(payload.length / RESULT_PAYLOAD_CHUNK_CHARS)
+  figma.ui.postMessage({
+    type: 'result-start',
+    id,
+    total,
+    chars: payload.length,
+  })
+
+  for (let i = 0; i < total; i++) {
+    if (generation !== inspectGeneration) return
+    const start = i * RESULT_PAYLOAD_CHUNK_CHARS
+    figma.ui.postMessage({
+      type: 'result-chunk',
+      id,
+      index: i,
+      total,
+      chunk: payload.slice(start, start + RESULT_PAYLOAD_CHUNK_CHARS),
+    })
+    // 让出主线程，便于 UI 更新接收进度
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  }
+
+  if (generation !== inspectGeneration) return
+  figma.ui.postMessage({type: 'result-end', id})
 }
 
 let inspectGeneration = 0
@@ -2409,8 +2585,9 @@ async function setNodesVisible(
 
 /**
  * 读取指定节点并回传 UI。
- * 流程：校验 → loading → 递归序列化 → 导出图片 → 回传结果
- * 约束：用 generation 丢弃过期的异步结果
+ * 流程：校验 → loading → 多根串行序列化（每根立即池化 PNG/SVG）→
+ * 导出 fill 图 → 分块回传结果
+ * 约束：用 generation 丢弃过期的异步结果；切图并发受 MAX_EXPORT_CONCURRENCY 限制
  * 副作用：figma.ui.postMessage、inspectedRootIds
  */
 async function inspectNodes(selection: SceneNode[]): Promise<void> {
@@ -2433,21 +2610,44 @@ async function inspectNodes(selection: SceneNode[]): Promise<void> {
     // 预创建 scratch，后续 full 切图 / 行高测量都挂在这里，避免当前页 Layers 闪烁
     getInspectScratchPage()
 
+    const rootTotal = selection.length
     figma.ui.postMessage({
       type: 'loading',
-      message: `正在读取 ${selection.map((n) => n.name).join(', ')}（矢量 SVG+PNG）…`,
-      selectedCount: selection.length,
+      message:
+        rootTotal > 1
+          ? `正在读取 0/${rootTotal} 个根节点…`
+          : `正在读取 ${selection[0].name}…`,
+      selectedCount: rootTotal,
     })
 
     const nodes: NodeInfo[] = []
-    for (const node of selection) {
+    const images: Record<string, ImageAsset> = {}
+    const svgs: Record<string, SvgAsset> = {}
+    let vectorPngRefs = 0
+
+    // 多根串行：每根读完立刻池化，避免三个长列表的内联 base64 同时堆在内存里
+    for (let i = 0; i < selection.length; i++) {
+      if (generation !== inspectGeneration) return
+      const node = selection[i]
+      figma.ui.postMessage({
+        type: 'loading',
+        message:
+          rootTotal > 1
+            ? `正在读取 ${i + 1}/${rootTotal}：${node.name}…`
+            : `正在读取 ${node.name}…`,
+        selectedCount: rootTotal,
+      })
+
       const pageWidth = getNodeLayoutWidth(node) || 375
       const serialized = await serializeNode(node, {pageWidth})
-      if (serialized) {
-        attachRootRelativeCoords(serialized)
-        nodes.push(serialized)
-      }
-      if (generation !== inspectGeneration) return
+      if (!serialized) continue
+
+      attachRootRelativeCoords(serialized)
+      stripRedundantSvg([serialized])
+      const vectorPool = poolVectorPngAssets([serialized], images)
+      vectorPngRefs += vectorPool.refs
+      poolSvgAssets([serialized], svgs)
+      nodes.push(serialized)
     }
 
     if (nodes.length === 0) {
@@ -2463,7 +2663,6 @@ async function inspectNodes(selection: SceneNode[]): Promise<void> {
     inspectedRootIds = nodes.map((n) => n.id)
 
     const hashes = Array.from(collectImageHashes(nodes))
-    let images: Record<string, ImageAsset> = {}
 
     if (hashes.length > 0) {
       if (generation !== inspectGeneration) return
@@ -2473,20 +2672,23 @@ async function inspectNodes(selection: SceneNode[]): Promise<void> {
         selectedCount: selection.length,
       })
 
-      images = await exportImagesByHash(hashes, (done, total) => {
-        if (generation !== inspectGeneration) return
-        figma.ui.postMessage({
-          type: 'loading',
-          message: `正在导出图片 ${done}/${total}…`,
-          selectedCount: selection.length,
-        })
-      })
+      await exportImagesByHash(
+        hashes,
+        (done, total) => {
+          if (generation !== inspectGeneration) return
+          figma.ui.postMessage({
+            type: 'loading',
+            message: `正在导出图片 ${done}/${total}…`,
+            selectedCount: selection.length,
+          })
+        },
+        images,
+      )
     }
 
     const fillRefs = countImageFillReferences(nodes)
     applyImageRefCounts(images, fillRefs.perHash)
     const mergedFillDupes = dedupeImagesByContent(images)
-    const vectorPool = poolVectorPngAssets(nodes, images)
 
     if (generation !== inspectGeneration) return
 
@@ -2497,6 +2699,9 @@ async function inspectNodes(selection: SceneNode[]): Promise<void> {
     const imageUniqueCount = countUniqueImageAssets(images)
     const exportAsImageCount = countExportAsImageNodes(nodes)
     const htmlLayoutWarnings = collectHtmlLayoutWarnings(nodes)
+    const vectorPngUniqueCount = Object.keys(images).filter((k) =>
+      k.startsWith(VECTOR_IMAGE_PREFIX),
+    ).length
     const data = {
       page: figma.currentPage.name,
       selectedCount: selection.length,
@@ -2509,23 +2714,30 @@ async function inspectNodes(selection: SceneNode[]): Promise<void> {
       imageFillRefCount: fillRefs.total,
       imageFillUniqueCount: hashes.length - mergedFillDupes,
       imageMergedDuplicateCount: mergedFillDupes,
-      vectorPngRefCount: vectorPool.refs,
-      vectorPngUniqueCount: vectorPool.unique,
+      vectorPngRefCount: vectorPngRefs,
+      vectorPngUniqueCount,
       svgCount: svgStats.ok,
       svgErrorCount: svgStats.error,
+      svgAssetCount: Object.keys(svgs).length,
       pngCount: pngStats.ok,
       pngErrorCount: pngStats.error,
       exportAsImageCount,
       fontCount: fonts.length,
       fonts,
       images,
+      svgs,
       nodes,
     }
 
-    // 大树用 JSON 字符串传递，避免 structured clone 对超大对象失败
-    const payload = JSON.stringify(data)
+    // 大树用 JSON 字符串 + 分块传递，避免单次 postMessage 过大导致标签页崩溃
     if (generation !== inspectGeneration) return
-    figma.ui.postMessage({type: 'result', payload})
+    figma.ui.postMessage({
+      type: 'loading',
+      message: '正在回传结果…',
+      selectedCount: selection.length,
+    })
+    const payload = JSON.stringify(data)
+    await postResultPayload(payload, generation)
   } catch (error) {
     if (generation !== inspectGeneration) return
     const message = error instanceof Error ? error.message : String(error)
@@ -2559,7 +2771,7 @@ function countSvgNodes(nodes: NodeInfo[]): {ok: number; error: number} {
   let ok = 0
   let error = 0
   for (const node of nodes) {
-    if (node.svg) ok += 1
+    if (node.svg || node.svgRef) ok += 1
     if (node.svgError) error += 1
     if (node.children) {
       const nested = countSvgNodes(node.children)

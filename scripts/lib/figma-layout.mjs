@@ -172,6 +172,47 @@ function formatGradientStopPercent(value) {
   return Number((value * 100).toFixed(2)).toString()
 }
 
+/**
+ * 将 paint.opacity 乘进 #RRGGBB / #RRGGBBAA。
+ * 渐变色标序列化时未烘焙 paint 级透明度，CSS 侧需补上。
+ */
+export function multiplyHexAlpha(hex, opacity = 1) {
+  if (typeof hex !== 'string' || !hex.startsWith('#')) return hex
+  if (typeof opacity !== 'number' || !(opacity < 1)) return hex
+  const raw = hex.slice(1)
+  let r
+  let g
+  let b
+  let a = 1
+  if (raw.length === 3 || raw.length === 4) {
+    r = parseInt(raw[0] + raw[0], 16)
+    g = parseInt(raw[1] + raw[1], 16)
+    b = parseInt(raw[2] + raw[2], 16)
+    if (raw.length === 4) a = parseInt(raw[3] + raw[3], 16) / 255
+  } else if (raw.length === 6 || raw.length === 8) {
+    r = parseInt(raw.slice(0, 2), 16)
+    g = parseInt(raw.slice(2, 4), 16)
+    b = parseInt(raw.slice(4, 6), 16)
+    if (raw.length === 8) a = parseInt(raw.slice(6, 8), 16) / 255
+  } else {
+    return hex
+  }
+  if ([r, g, b].some((n) => Number.isNaN(n))) return hex
+  a = Math.max(0, Math.min(1, a * opacity))
+  const toHex = (n) =>
+    Math.round(n)
+      .toString(16)
+      .padStart(2, '0')
+      .toUpperCase()
+  const rgb = `#${toHex(r)}${toHex(g)}${toHex(b)}`
+  if (a >= 1) return rgb
+  return `${rgb}${toHex(a * 255)}`
+}
+
+function gradientStopColor(stop, paintOpacity = 1) {
+  return multiplyHexAlpha(stop?.color, paintOpacity)
+}
+
 function inverseTransform2x3(matrix) {
   const [a, c, e] = matrix[0]
   const [b, d, f] = matrix[1]
@@ -212,7 +253,11 @@ function projectPointOntoLine(point, lineStart, lineEnd) {
  */
 export function linearGradientPaintToCss(paint, width, height) {
   if (!paint?.stops?.length) return null
-  if (paint.stops.length === 1) return paint.stops[0].color
+  const paintOpacity =
+    typeof paint.opacity === 'number' ? paint.opacity : 1
+  if (paint.stops.length === 1) {
+    return gradientStopColor(paint.stops[0], paintOpacity)
+  }
 
   const w = typeof width === 'number' && width > 0 ? width : 100
   const h = typeof height === 'number' && height > 0 ? height : 100
@@ -221,7 +266,10 @@ export function linearGradientPaintToCss(paint, width, height) {
   if (!transform || transform.length !== 2) {
     const angle = paint.cssAngle ?? 180
     const stops = paint.stops
-      .map((s) => `${s.color} ${formatGradientStopPercent(s.position)}%`)
+      .map(
+        (s) =>
+          `${gradientStopColor(s, paintOpacity)} ${formatGradientStopPercent(s.position)}%`,
+      )
       .join(', ')
     return `linear-gradient(${angle}deg, ${stops})`
   }
@@ -230,7 +278,10 @@ export function linearGradientPaintToCss(paint, width, height) {
   if (!inverse) {
     const angle = paint.cssAngle ?? 180
     const stops = paint.stops
-      .map((s) => `${s.color} ${formatGradientStopPercent(s.position)}%`)
+      .map(
+        (s) =>
+          `${gradientStopColor(s, paintOpacity)} ${formatGradientStopPercent(s.position)}%`,
+      )
       .join(', ')
     return `linear-gradient(${angle}deg, ${stops})`
   }
@@ -248,7 +299,9 @@ export function linearGradientPaintToCss(paint, width, height) {
 
   const dx = figmaEnd.x - figmaStart.x
   const dy = figmaEnd.y - figmaStart.y
-  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return paint.stops[0].color
+  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) {
+    return gradientStopColor(paint.stops[0], paintOpacity)
+  }
 
   let cssAngleDeg = (Math.atan2(dy, dx) * 180) / Math.PI + 90
   cssAngleDeg = ((cssAngleDeg % 360) + 360) % 360
@@ -272,7 +325,9 @@ export function linearGradientPaintToCss(paint, width, height) {
   const cssVecX = cssEnd.x - cssStart.x
   const cssVecY = cssEnd.y - cssStart.y
   const cssLength = Math.hypot(cssVecX, cssVecY)
-  if (cssLength < 1e-6) return paint.stops[0].color
+  if (cssLength < 1e-6) {
+    return gradientStopColor(paint.stops[0], paintOpacity)
+  }
 
   const mappedStops = paint.stops.map((stop) => {
     const figmaPoint = {
@@ -286,7 +341,7 @@ export function linearGradientPaintToCss(paint, width, height) {
     const projectedLength = Math.hypot(projectedVecX, projectedVecY)
     const signedDistance = Math.sign(dotProduct || 1) * projectedLength
     return {
-      color: stop.color,
+      color: gradientStopColor(stop, paintOpacity),
       position: signedDistance / cssLength,
     }
   })
@@ -295,6 +350,47 @@ export function linearGradientPaintToCss(paint, width, height) {
     .map((s) => `${s.color} ${formatGradientStopPercent(s.position)}%`)
     .join(', ')
   return `linear-gradient(${Math.round(cssAngleDeg)}deg, ${stops})`
+}
+
+/**
+ * Figma GRADIENT_RADIAL → CSS radial-gradient。
+ * 句柄约定：梯度空间 (0.5,0.5) 为圆心，(1,0.5)/(0.5,1) 为椭圆轴端点。
+ */
+export function radialGradientPaintToCss(paint, width, height) {
+  if (!paint?.stops?.length) return null
+  const paintOpacity =
+    typeof paint.opacity === 'number' ? paint.opacity : 1
+  const stops = paint.stops
+    .map(
+      (s) =>
+        `${gradientStopColor(s, paintOpacity)} ${formatGradientStopPercent(s.position)}%`,
+    )
+    .join(', ')
+
+  const w = typeof width === 'number' && width > 0 ? width : 0
+  const h = typeof height === 'number' && height > 0 ? height : 0
+  const transform = paint.gradientTransform
+  if (!transform || transform.length !== 2 || !w || !h) {
+    return `radial-gradient(circle, ${stops})`
+  }
+
+  const inverse = inverseTransform2x3(transform)
+  if (!inverse) return `radial-gradient(circle, ${stops})`
+
+  const center = applyTransform2x3(inverse, 0.5, 0.5)
+  const rxPoint = applyTransform2x3(inverse, 1, 0.5)
+  const ryPoint = applyTransform2x3(inverse, 0.5, 1)
+  const cx = center.x * w
+  const cy = center.y * h
+  const rx = Math.hypot((rxPoint.x - center.x) * w, (rxPoint.y - center.y) * h)
+  const ry = Math.hypot((ryPoint.x - center.x) * w, (ryPoint.y - center.y) * h)
+  if (!(rx > 0) || !(ry > 0)) return `radial-gradient(circle, ${stops})`
+
+  const at = `${round(cx)}px ${round(cy)}px`
+  if (Math.abs(rx - ry) / Math.max(rx, ry) < 0.02) {
+    return `radial-gradient(${round(rx)}px at ${at}, ${stops})`
+  }
+  return `radial-gradient(${round(rx)}px ${round(ry)}px at ${at}, ${stops})`
 }
 
 /**
@@ -314,6 +410,102 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     return paints.filter((p) => p && p.visible !== false)
   }
 
+  /** 填充是否半透明：半透明时不能把描边渐变铺满整盒当底层，否则会透出来变成大光团 */
+  function fillsLookTranslucent(paints = []) {
+    const visible = visiblePaints(paints)
+    if (!visible.length) return true
+    return visible.some((paint) => {
+      const op = typeof paint.opacity === 'number' ? paint.opacity : 1
+      if (op < 0.999) return true
+      if (paint.type === 'SOLID' && typeof paint.color === 'string') {
+        const raw = paint.color.slice(1)
+        if (raw.length === 8) {
+          const a = parseInt(raw.slice(6, 8), 16) / 255
+          if (a < 0.999) return true
+        }
+        if (raw.length === 4) {
+          const a = parseInt(raw[3] + raw[3], 16) / 255
+          if (a < 0.999) return true
+        }
+      }
+      if (paint.stops?.length) {
+        return paint.stops.some((stop) => {
+          const c = stop?.color
+          if (typeof c !== 'string' || !c.startsWith('#')) return false
+          const raw = c.slice(1)
+          if (raw.length === 8) {
+            return parseInt(raw.slice(6, 8), 16) / 255 < 0.999
+          }
+          if (raw.length === 4) {
+            return parseInt(raw[3] + raw[3], 16) / 255 < 0.999
+          }
+          return false
+        })
+      }
+      return false
+    })
+  }
+
+  /**
+   * 矮装饰光条（标题下橙光等）：PNG 栅格 + 再 blur/opacity 容易发糊发暗，
+   * 有渐变 fills 时改走 CSS，更接近稿面软光。
+   */
+  function shouldPreferCssBlurGradient(node) {
+    const styles = node.styles || {}
+    const h = node.layout?.height
+    if (!(typeof h === 'number' && h > 0 && h <= 32)) return false
+    const hasBlur = (styles.effects || []).some(
+      (e) =>
+        e &&
+        e.visible !== false &&
+        e.type === 'LAYER_BLUR' &&
+        (e.radius || 0) > 0,
+    )
+    if (!hasBlur) return false
+    return visiblePaints(styles.fills).some(
+      (p) =>
+        p.type === 'GRADIENT_LINEAR' || p.type === 'GRADIENT_RADIAL',
+    )
+  }
+
+  /** 标题下光条：稿面小团柔光；用满 radius（常规层是 /2），勿再放大以免光团过大 */
+  function titleGlowBlurCss(effects = []) {
+    for (const e of effects) {
+      if (
+        !e ||
+        e.visible === false ||
+        e.type !== 'LAYER_BLUR' ||
+        !(e.radius > 0)
+      ) {
+        continue
+      }
+      return `blur(${ux(round(e.radius))})`
+    }
+    return null
+  }
+
+  /**
+   * 单边描边（列表分割线等）：border / box-shadow 都会被等高子层或
+   * 父级 overflow:hidden 吃掉，需在 HTML 里插绝对定位细线。
+   * 返回 null 表示不是「仅单边」场景，走常规 border。
+   */
+  function singleSideStrokeOverlay(weights, color) {
+    if (!weights || !color) return null
+    const t = weights.top || 0
+    const r = weights.right || 0
+    const b = weights.bottom || 0
+    const l = weights.left || 0
+    const sides = [
+      t > 0 ? ['top', t] : null,
+      r > 0 ? ['right', r] : null,
+      b > 0 ? ['bottom', b] : null,
+      l > 0 ? ['left', l] : null,
+    ].filter(Boolean)
+    if (sides.length !== 1) return null
+    const [side, w] = sides[0]
+    return {side, width: w, color}
+  }
+
   function paintBackground(paint, width, height) {
     if (!paint) return null
     if (paint.type === 'SOLID') {
@@ -323,10 +515,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       return linearGradientPaintToCss(paint, width, height)
     }
     if (paint.type === 'GRADIENT_RADIAL' && paint.stops?.length) {
-      const stops = paint.stops
-        .map((s) => `${s.color} ${round(s.position * 100)}%`)
-        .join(', ')
-      return `radial-gradient(circle, ${stops})`
+      return radialGradientPaintToCss(paint, width, height)
     }
     if (paint.type === 'IMAGE' && paint.imageHash) {
       const asset = resolveImageAsset(images, paint.imageHash)
@@ -552,6 +741,54 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     }
   }
 
+  /**
+   * Figma 图层 blendMode → CSS mix-blend-mode。
+   * LINEAR_DODGE（Add）对应 plus-lighter；光效/粒子常用，漏掉会明显发暗。
+   */
+  function mixBlendModeCss(blendMode) {
+    if (!blendMode || blendMode === 'PASS_THROUGH' || blendMode === 'NORMAL') {
+      return null
+    }
+    switch (blendMode) {
+      case 'MULTIPLY':
+        return 'multiply'
+      case 'SCREEN':
+        return 'screen'
+      case 'OVERLAY':
+        return 'overlay'
+      case 'DARKEN':
+        return 'darken'
+      case 'LIGHTEN':
+        return 'lighten'
+      case 'COLOR_DODGE':
+        return 'color-dodge'
+      case 'COLOR_BURN':
+      case 'LINEAR_BURN':
+        return 'color-burn'
+      case 'HARD_LIGHT':
+        return 'hard-light'
+      case 'SOFT_LIGHT':
+        return 'soft-light'
+      case 'DIFFERENCE':
+        return 'difference'
+      case 'EXCLUSION':
+        return 'exclusion'
+      case 'HUE':
+        return 'hue'
+      case 'SATURATION':
+        return 'saturation'
+      case 'COLOR':
+        return 'color'
+      case 'LUMINOSITY':
+        return 'luminosity'
+      case 'LINEAR_DODGE':
+      case 'ADD':
+        return 'plus-lighter'
+      default:
+        return null
+    }
+  }
+
   function radiusCss(styles = {}, nodeType) {
     if (nodeType === 'ELLIPSE') return '50%'
     const tl = styles.topLeftRadius
@@ -762,6 +999,66 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     return Math.abs(childStart - padStart) < 1
   }
 
+  /** Auto Layout 中参与主轴排布的子项（绝对定位不占位） */
+  function flowAutoLayoutChildren(node) {
+    return (node.children || []).filter(
+      (c) =>
+        c.visible !== false &&
+        c.layout?.layoutPositioning !== 'ABSOLUTE',
+    )
+  }
+
+  /**
+   * 主轴 justify-content。
+   * CSS 的 space-between 在仅 1 个子项时等价于 flex-start；
+   * Figma SPACE_BETWEEN（Gap: Auto）单子项时实际位置多为居中，需对齐画布。
+   */
+  function autoLayoutMainJustify(node, layout) {
+    if (isTopPackedAutoLayout(node)) return 'flex-start'
+    if (layout.primaryAxisAlignItems === 'SPACE_BETWEEN') {
+      if (flowAutoLayoutChildren(node).length <= 1) return 'center'
+    }
+    return alignMain(layout.primaryAxisAlignItems)
+  }
+
+  /**
+   * 按 Figma 图层顺序写 z-index（先声明在下、后声明在上）。
+   *
+   * 1) Auto Layout 内混有 ABSOLUTE 子项：CSS 会把 absolute 画在普通流之上，
+   *    需显式 z-index；流式子项补 position:relative。
+   * 2) 自由定位（非 AL）父级：子项虽均为 absolute，但若某子树内部又写了
+   *    z-index（例如嵌套 AL+ABSOLUTE），而该子项自身 z-index:auto，则
+   *    **不会**形成 stacking context，子级 z-index 会泄漏到祖先，盖住
+   *    后面的蒙层/弹窗。给自由定位兄弟都写上 z-index，既对齐 Figma，
+   *    也把子树层级关进各自的 stacking context。
+   */
+  function appendSiblingStackOrder(
+    css,
+    node,
+    parent,
+    parentAutoLayout,
+    useAbsolute,
+  ) {
+    if (!parent?.children?.length) return
+    const siblings = parent.children.filter((c) => c.visible !== false)
+    if (siblings.length <= 1) return
+
+    if (parentAutoLayout) {
+      const hasAbsoluteSibling = siblings.some(
+        (c) => c.layout?.layoutPositioning === 'ABSOLUTE',
+      )
+      if (!hasAbsoluteSibling) return
+    }
+
+    const index = siblings.findIndex((c) => c.id === node.id)
+    if (index < 0) return
+    if (parentAutoLayout && !useAbsolute) {
+      const hasPos = css.some((s) => s.startsWith('position:'))
+      if (!hasPos) css.push('position:relative')
+    }
+    css.push(`z-index:${index}`)
+  }
+
   /**
    * 定宽文本框（可换行 / 多行）：HEIGHT、NONE、TRUNCATE，或 maxLines>1。
    * WIDTH_AND_HEIGHT 为内容撑开，不做宽高限制。
@@ -806,9 +1103,18 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     }
     css.push('box-sizing:border-box')
 
+    // mix-blend 与 filter 同元素会隔离合成，导致 LINEAR_DODGE 等加亮失效；
+    // filter 延后到 isolatedFilter，由 HTML 包一层再画。
+    const preferCssBlurGradient = shouldPreferCssBlurGradient(node)
+    let mixBlend = mixBlendModeCss(node.blendMode)
+    // 标题下暖色光条在深色底上需加亮混合才接近稿面
+    if (!mixBlend && preferCssBlurGradient) {
+      mixBlend = 'plus-lighter'
+    }
     if (typeof node.opacity === 'number' && node.opacity < 1) {
       css.push(`opacity:${round(node.opacity)}`)
     }
+    if (mixBlend) css.push(`mix-blend-mode:${mixBlend}`)
 
     if (node.clipsContent) css.push('overflow:hidden')
 
@@ -865,13 +1171,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         const left = Math.max(0, round(p.left) - strokeForPad)
         css.push(`padding:${ux(top)} ${ux(right)} ${ux(bottom)} ${ux(left)}`)
       }
-      css.push(
-        `justify-content:${
-          isTopPackedAutoLayout(node)
-            ? 'flex-start'
-            : alignMain(layout.primaryAxisAlignItems)
-        }`,
-      )
+      css.push(`justify-content:${autoLayoutMainJustify(node, layout)}`)
       css.push(`align-items:${alignCross(layout.counterAxisAlignItems)}`)
     }
 
@@ -890,6 +1190,14 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       // flex 子项同时作为绝对定位容器
       css.push('position:relative')
     }
+
+    appendSiblingStackOrder(
+      css,
+      node,
+      parent,
+      parentAutoLayout,
+      useAbsolute,
+    )
 
     if (parentAutoLayout && !useAbsolute && layout.layoutGrow) {
       css.push(`flex-grow:${layout.layoutGrow}`)
@@ -928,10 +1236,52 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
     const strokes =
       node.svg || node.png || node.pngRef ? [] : visiblePaints(styles.strokes)
+    const individualStrokeWeights = strokes.length
+      ? {
+          top:
+            typeof styles.strokeTopWeight === 'number'
+              ? round(styles.strokeTopWeight)
+              : null,
+          right:
+            typeof styles.strokeRightWeight === 'number'
+              ? round(styles.strokeRightWeight)
+              : null,
+          bottom:
+            typeof styles.strokeBottomWeight === 'number'
+              ? round(styles.strokeBottomWeight)
+              : null,
+          left:
+            typeof styles.strokeLeftWeight === 'number'
+              ? round(styles.strokeLeftWeight)
+              : null,
+        }
+      : null
+    const hasIndividualStroke =
+      !!individualStrokeWeights &&
+      [
+        individualStrokeWeights.top,
+        individualStrokeWeights.right,
+        individualStrokeWeights.bottom,
+        individualStrokeWeights.left,
+      ].some((v) => typeof v === 'number' && v > 0)
+    // mixed 旧 JSON 未带四边宽度时：有描边色则回退 1px，避免列表分割线丢失
+    const strokeWeightFallback =
+      strokes.length &&
+      typeof styles.strokeWeight !== 'number' &&
+      !hasIndividualStroke
+        ? 1
+        : 0
     const strokeWeight =
       strokes.length && typeof styles.strokeWeight === 'number'
         ? round(styles.strokeWeight)
-        : 0
+        : hasIndividualStroke
+          ? Math.max(
+              individualStrokeWeights.top || 0,
+              individualStrokeWeights.right || 0,
+              individualStrokeWeights.bottom || 0,
+              individualStrokeWeights.left || 0,
+            )
+          : strokeWeightFallback
     const strokeBg =
       strokeWeight > 0
         ? paintBackground(
@@ -942,15 +1292,43 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         : null
     const strokeColor = typeof strokeBg === 'string' ? strokeBg : null
     const strokeIsGradient = cssLooksLikeGradient(strokeColor)
-    // border-color 不支持渐变；内侧描边用透明 border + 底层渐变 clip 到边框区
+    const strokePaint =
+      strokeWeight > 0 ? strokes[strokes.length - 1] : null
+    // 单边描边改走绝对定位细线（见 strokeOverlay），避免被盖住/裁切
+    let strokeOverlay = null
+    // 渐变描边 + 半透明填充：用 mask 只画边框环（见 gradientBorderMask）
+    let gradientBorderMask = null
+    const translucentFills = fillsLookTranslucent(styles.fills)
+    // border-color 不支持渐变；不透明填充时可用底层渐变 clip 到边框区
     const useGradientBorder =
       strokeIsGradient &&
       !isText &&
       styles.strokeAlign !== 'OUTSIDE' &&
-      styles.strokeAlign !== 'CENTER'
+      styles.strokeAlign !== 'CENTER' &&
+      !hasIndividualStroke &&
+      !translucentFills
+    if (
+      strokeIsGradient &&
+      !isText &&
+      styles.strokeAlign !== 'OUTSIDE' &&
+      styles.strokeAlign !== 'CENTER' &&
+      !hasIndividualStroke &&
+      translucentFills
+    ) {
+      gradientBorderMask = {
+        gradient: strokeColor,
+        width: strokeWeight || 1,
+        blendMode: strokePaint?.blendMode || null,
+      }
+    }
 
     // 导出的 SVG/PNG 已含 fill/stroke，重复映射会把图标覆盖成色块。
-    if (!node.svg && !node.png && !node.pngRef) {
+    // 矮模糊光条例外：用 fills + CSS blur，避免 PNG 再模糊发暗。
+    if (
+      !node.svg &&
+      !node.png &&
+      (!node.pngRef || preferCssBlurGradient)
+    ) {
       const imageLayers = imageBackgrounds(
         styles.fills,
         layout.width,
@@ -1060,8 +1438,43 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       // 文字描边：box-shadow 对字形无效，用一圈 text-shadow 近似
       const ts = textStrokeShadow(strokeColor, strokeWeight)
       if (ts) css.push(`text-shadow:${ts}`)
-    } else if (useGradientBorder) {
-      css.push(`border:${ux(strokeWeight)} solid transparent`)
+    } else if (useGradientBorder || gradientBorderMask) {
+      css.push(
+        `border:${ux(strokeWeight || gradientBorderMask?.width || 1)} solid transparent`,
+      )
+    } else if (
+      strokeColor &&
+      hasIndividualStroke &&
+      styles.strokeAlign !== 'OUTSIDE'
+    ) {
+      const t = individualStrokeWeights.top || 0
+      const r = individualStrokeWeights.right || 0
+      const b = individualStrokeWeights.bottom || 0
+      const l = individualStrokeWeights.left || 0
+      const sideOverlay = singleSideStrokeOverlay(
+        individualStrokeWeights,
+        strokeColor,
+      )
+      if (sideOverlay) {
+        strokeOverlay = sideOverlay
+      } else {
+        css.push('border-style:solid')
+        css.push(`border-color:${strokeColor}`)
+        css.push(
+          `border-width:${ux(t)} ${ux(r)} ${ux(b)} ${ux(l)}`,
+        )
+      }
+    } else if (
+      strokeColor &&
+      strokeWeightFallback > 0 &&
+      styles.strokeAlign !== 'OUTSIDE'
+    ) {
+      // 旧导出丢失 mixed 边宽：列表行常见为底部分割线
+      strokeOverlay = {
+        side: 'bottom',
+        width: strokeWeightFallback,
+        color: strokeColor,
+      }
     } else if (strokeColor && styles.strokeAlign === 'CENTER') {
       css.push(`outline:${ux(strokeWeight)} solid ${strokeColor}`)
       css.push(`outline-offset:-${ux(strokeWeight / 2)}`)
@@ -1091,11 +1504,37 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       shadowParts.push(`0 0 0 ${ux(strokeWeight)} ${strokeColor}`)
     }
     if (shadowParts.length) css.push(`box-shadow:${shadowParts.join(', ')}`)
+    // 绝对定位细线 / mask 描边需要 position:relative 作包含块
+    if (
+      (strokeOverlay || gradientBorderMask) &&
+      !css.some(
+        (p) =>
+          p === 'position:absolute' ||
+          p === 'position:relative' ||
+          p === 'position:fixed',
+      )
+    ) {
+      css.push('position:relative')
+    }
 
     const blurs = blurFilters(styles.effects)
     const filterParts = [...shadow.dropFilters]
-    if (blurs.filter) filterParts.push(blurs.filter)
-    if (filterParts.length) css.push(`filter:${filterParts.join(' ')}`)
+    const titleGlowBlur = preferCssBlurGradient
+      ? titleGlowBlurCss(styles.effects)
+      : null
+    if (titleGlowBlur) {
+      filterParts.push(titleGlowBlur)
+    } else if (blurs.filter) {
+      filterParts.push(blurs.filter)
+    }
+    const filterCss = filterParts.length ? filterParts.join(' ') : null
+    // 与 mix-blend-mode 并存时，filter 放到内层，避免 stacking isolation 吃掉加亮
+    let isolatedFilter = null
+    if (filterCss && mixBlend) {
+      isolatedFilter = filterCss
+    } else if (filterCss) {
+      css.push(`filter:${filterCss}`)
+    }
     if (blurs.backdrop) {
       css.push(`backdrop-filter:${blurs.backdrop}`)
       css.push(`-webkit-backdrop-filter:${blurs.backdrop}`)
@@ -1119,7 +1558,12 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       css.push(...textWrapCss(node))
     }
 
-    return css.join(';')
+    return {
+      css: css.join(';'),
+      isolatedFilter,
+      strokeOverlay,
+      gradientBorderMask,
+    }
   }
 
   /**
@@ -1464,5 +1908,6 @@ return {
     googleFontsLinkFromImports,
     renderTextHtmlContent,
     solidColorFromFills,
+    shouldPreferCssBlurGradient,
   }
 }
