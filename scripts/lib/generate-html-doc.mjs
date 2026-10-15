@@ -305,17 +305,24 @@ export function generateHtmlDocument(data, options = {}) {
   const rawSvgs = data.svgs || {}
   let imagesForLayout = rawImages
 
-  if (imageMode === 'external' && typeof imageSrcForHash === 'function') {
+  if (imageMode === 'external') {
     imagesForLayout = {}
-    for (const [hash, asset] of Object.entries(rawImages)) {
+    for (const [hash] of Object.entries(rawImages)) {
       const resolved = resolveImageAsset(rawImages, hash)
-      if (!resolved?.dataUrl) continue
-      const src = imageSrcForHash(hash, resolved)
+      if (!resolved) continue
+      const src =
+        (typeof imageSrcForHash === 'function'
+          ? imageSrcForHash(hash, resolved)
+          : null) ||
+        resolved.path ||
+        resolved.dataUrl ||
+        null
       if (src) {
         imagesForLayout[hash] = {
           mime: resolved.mime || 'image/png',
           dataUrl: src,
           byteLength: resolved.byteLength || 0,
+          path: resolved.path,
         }
       }
     }
@@ -434,7 +441,10 @@ export function generateHtmlDocument(data, options = {}) {
     const pngSrc = preferCssGlow
       ? null
       : (typeof vectorSrcForId === 'function' && vectorSrcForId(node.id)) ||
-        (imageMode === 'inline' ? resolveNodePng(node, rawImages) : null)
+        resolveNodePng(
+          node,
+          imageMode === 'inline' ? rawImages : imagesForLayout,
+        )
     if (pngSrc) {
       if (isolatedFilter) {
         // 外层承担定位 / opacity / mix-blend；img 只负责像素与 blur

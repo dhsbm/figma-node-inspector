@@ -128,6 +128,13 @@ export function cssFontWeight(weight) {
   return Math.max(MIN_CSS_FONT_WEIGHT, Math.round(weight))
 }
 
+/** Figma fontName.style 含 Italic / Oblique 时视为斜体 */
+export function isItalicFontStyle(style) {
+  if (!style || typeof style !== 'string') return false
+  const s = style.toLowerCase()
+  return s.includes('italic') || s.includes('oblique')
+}
+
 export function esc(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -153,17 +160,20 @@ export function resolveImageAsset(images, key) {
       k = asset.duplicateOf
       continue
     }
-    if (asset.dataUrl) return asset
+    // ZIP 落盘后常只剩 path；inspect 内存里则有 dataUrl
+    if (asset.dataUrl || asset.path) return asset
     return null
   }
   return null
 }
 
-/** 矢量节点 png / pngRef → dataUrl */
+/** 矢量节点 png / pngRef → 可用 src（dataUrl 或相对 path） */
 export function resolveNodePng(node, images) {
   if (node.png) return node.png
-  if (node.pngRef)
-    return resolveImageAsset(images, node.pngRef)?.dataUrl || null
+  if (node.pngRef) {
+    const asset = resolveImageAsset(images, node.pngRef)
+    return asset?.dataUrl || asset?.path || null
+  }
   return null
 }
 
@@ -856,6 +866,9 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     if (baseline.fontSize) css.push(`font-size:${ux(baseline.fontSize)}`)
     const weight = cssFontWeight(baseline.fontWeight)
     if (weight != null) css.push(`font-weight:${weight}`)
+    if (isItalicFontStyle(baseline.fontName?.style)) {
+      css.push('font-style:italic')
+    }
     if (baseline.fontName) {
       css.push(`font-family:${fontFamily(baseline.fontName)}`)
     }
@@ -1009,16 +1022,69 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
   }
 
   /**
+   * SPACE_BETWEEN 子项总尺寸相对内容盒的溢出量（>0 表示放不下）。
+   * 超出时 CSS space-between / margin:auto 都会失效（负自由空间当 0），
+   * 而 Figma 仍把首尾钉在 padding 内缘，允许子项重叠。
+   */
+  function spaceBetweenOverflowAmount(node, layout) {
+    if (layout?.primaryAxisAlignItems !== 'SPACE_BETWEEN') return 0
+    const kids = flowAutoLayoutChildren(node)
+    if (kids.length < 2) return 0
+    const isVert = layout.layoutMode === 'VERTICAL'
+    const pad = layout.padding || {}
+    const padStart = isVert ? (pad.top ?? 0) : (pad.left ?? 0)
+    const padEnd = isVert ? (pad.bottom ?? 0) : (pad.right ?? 0)
+    const inner = (isVert ? layout.height : layout.width) - padStart - padEnd
+    if (!(inner > 0)) return 0
+    let total = 0
+    for (const child of kids) {
+      const size = isVert
+        ? (child.layout?.height ?? 0)
+        : (child.layout?.width ?? 0)
+      total += size
+    }
+    const overflow = total - inner
+    return overflow > 0.5 ? overflow : 0
+  }
+
+  /**
    * 主轴 justify-content。
    * CSS 的 space-between 在仅 1 个子项时等价于 flex-start；
    * Figma SPACE_BETWEEN（Gap: Auto）单子项时实际位置多为居中，需对齐画布。
+   * 子项溢出内容盒时改 flex-start，末项用负 margin 钉尾（见下）。
    */
   function autoLayoutMainJustify(node, layout) {
     if (isTopPackedAutoLayout(node)) return 'flex-start'
     if (layout.primaryAxisAlignItems === 'SPACE_BETWEEN') {
-      if (flowAutoLayoutChildren(node).length <= 1) return 'center'
+      const flow = flowAutoLayoutChildren(node)
+      if (flow.length <= 1) return 'center'
+      if (spaceBetweenOverflowAmount(node, layout) > 0) return 'flex-start'
     }
     return alignMain(layout.primaryAxisAlignItems)
+  }
+
+  /**
+   * 溢出的 SPACE_BETWEEN：末个流式子项加负 margin，使其右/下缘对齐 padding 内缘。
+   * （margin:auto 在负剩余空间时会被当成 0，不能用。）
+   */
+  function appendSpaceBetweenOverflowMargin(
+    css,
+    node,
+    parent,
+    parentAutoLayout,
+  ) {
+    if (!parentAutoLayout || !parent?.layout) return
+    const overflow = spaceBetweenOverflowAmount(parent, parent.layout)
+    if (!(overflow > 0)) return
+    const flow = flowAutoLayoutChildren(parent)
+    if (flow.length < 2) return
+    if (flow[flow.length - 1]?.id !== node.id) return
+    const pull = round(overflow)
+    if (parent.layout.layoutMode === 'VERTICAL') {
+      css.push(`margin-top:-${ux(pull)}`)
+    } else {
+      css.push(`margin-left:-${ux(pull)}`)
+    }
   }
 
   /**
@@ -1205,6 +1271,9 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     if (parentAutoLayout && !useAbsolute) {
       // Figma 固定尺寸子项不会因父容器空间不足而收缩。
       css.push('flex-shrink:0')
+    }
+    if (parentAutoLayout && !useAbsolute) {
+      appendSpaceBetweenOverflowMargin(css, node, parent, parentAutoLayout)
     }
     if (parentAutoLayout && !useAbsolute && layout.layoutAlign === 'STRETCH') {
       css.push('align-self:stretch')
@@ -1690,15 +1759,28 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
   /**
    * 从 node.json.fonts 或节点树收集需 CDN 加载的字体。
-   * 按 Google 族名聚合字重，避免单字重字体请求多余 wght 失败。
+   * 按 Google 族名聚合字重与斜体，避免单字重字体请求多余 wght 失败。
    */
   function resolveGoogleFontImports(root, fontRefs) {
+    /** @type {Map<string, {normal: Set<number>, italic: Set<number>}>} */
     const byGoogleFamily = new Map()
+    /** @type {Set<number>} */
     const sfProWeights = new Set()
+
+    const ensureFamily = (googleFamily) => {
+      if (!byGoogleFamily.has(googleFamily)) {
+        byGoogleFamily.set(googleFamily, {
+          normal: new Set(),
+          italic: new Set(),
+        })
+      }
+      return byGoogleFamily.get(googleFamily)
+    }
 
     const addRef = (ref) => {
       if (!ref?.family) return
       const weight = cssFontWeight(ref.weight) ?? MIN_CSS_FONT_WEIGHT
+      const italic = isItalicFontStyle(ref.style)
       if (
         isSystemFontFamily(ref.family) &&
         String(ref.family).toLowerCase().includes('sf pro')
@@ -1710,10 +1792,9 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       if (ref.provider && ref.provider !== 'google') return
       const googleFamily = GOOGLE_FONT_FAMILY_MAP[ref.family]
       if (!googleFamily) return
-      if (!byGoogleFamily.has(googleFamily)) {
-        byGoogleFamily.set(googleFamily, new Set())
-      }
-      byGoogleFamily.get(googleFamily).add(weight)
+      const bucket = ensureFamily(googleFamily)
+      if (italic) bucket.italic.add(weight)
+      else bucket.normal.add(weight)
     }
 
     if (Array.isArray(fontRefs) && fontRefs.length) {
@@ -1740,25 +1821,30 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
     // SF Pro 无法外链：额外加载 Inter 作为栈内回退（font-family 中排在 SF Pro 之后）
     if (sfProWeights.size) {
-      if (!byGoogleFamily.has('Inter')) {
-        byGoogleFamily.set('Inter', new Set())
-      }
-      for (const w of sfProWeights) {
-        byGoogleFamily.get('Inter').add(w)
-      }
+      const bucket = ensureFamily('Inter')
+      for (const w of sfProWeights) bucket.normal.add(w)
     }
 
-    return [...byGoogleFamily.entries()].map(([family, weights]) => ({
+    return [...byGoogleFamily.entries()].map(([family, buckets]) => ({
       family,
-      weights: [...weights].sort((a, b) => a - b),
+      weights: [...buckets.normal].sort((a, b) => a - b),
+      italicWeights: [...buckets.italic].sort((a, b) => a - b),
     }))
   }
 
   function googleFontsLinkFromImports(imports) {
     if (!imports.length) return ''
     const q = imports
-      .map(({family, weights}) => {
+      .map(({family, weights = [], italicWeights = []}) => {
         const name = encodeURIComponent(family).replace(/%20/g, '+')
+        if (italicWeights.length) {
+          // CSS2：ital,wght@0,400;1,800 — 0 正体，1 斜体
+          const pairs = [
+            ...weights.map((w) => `0,${w}`),
+            ...italicWeights.map((w) => `1,${w}`),
+          ]
+          return `family=${name}:ital,wght@${pairs.join(';')}`
+        }
         const wght = weights.join(';')
         return `family=${name}:wght@${wght}`
       })
@@ -1888,6 +1974,13 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
             seg.fontName.style !== baseline.fontName.style)
         ) {
           parts.push(`font-family:${fontFamily(seg.fontName)}`)
+        }
+        {
+          const segItalic = isItalicFontStyle(seg.fontName?.style)
+          const baseItalic = isItalicFontStyle(baseline.fontName?.style)
+          if (segItalic !== baseItalic) {
+            parts.push(`font-style:${segItalic ? 'italic' : 'normal'}`)
+          }
         }
         const body = escapeHtml(seg.characters || '')
         if (!parts.length) return body
