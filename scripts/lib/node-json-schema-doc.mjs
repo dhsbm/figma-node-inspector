@@ -87,7 +87,7 @@ export function getNodeJsonSchemaDoc() {
 | \`flattened\` | \`true\`：整颗视觉已烘焙为单图（含矢量切图成功）。生成侧**勿展开** \`children\`；若同时有 \`png\`/\`pngRef\`，旋转等变换已进像素，**勿再叠 CSS \`rotate\`** |
 | \`exportAsImage\` | 用户标记按图片导出（节点 \`pluginData\`）；生成侧应输出 \`<img>\` |
 | \`skipImageBake\` | 用户标记为非图片：跳过自动切图策略，展开子层 / CSS 还原 |
-| \`exportInspectMode\` | Inspect 切图：\`full\`（宽 ≤ 页面宽，完整导出，layout 保留节点盒）/ \`cropped\`（宽 > 页面宽，原位裁切，layout 对齐 PNG） |
+| \`exportInspectMode\` | Inspect 切图：\`full\`（宽 ≤ 页面宽，完整导出）/ \`cropped\`（宽 > 页面宽，原位裁切）。两种模式的 layout 均按 \`absoluteBoundingBox\` 相对父盒对齐 PNG（避免翻转层 \`node.x\` 落在视觉右缘导致 left 偏移） |
 | \`booleanOperation\` | 仅 \`BOOLEAN_OPERATION\`：\`UNION\` / \`INTERSECT\` / \`SUBTRACT\` / \`EXCLUDE\` |
 | \`htmlLayoutWarning\` | HTML 不支持的布局标记（见 §3.3）；生成 HTML 时应显著标注 |
 | \`component\` | Instance 信息：\`isInstance\`、\`mainComponentName\`、\`mainComponentId\`、\`variantProperties\` |

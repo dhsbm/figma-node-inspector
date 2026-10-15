@@ -1342,28 +1342,6 @@ async function exportNodePng(
 }
 
 /**
- * GROUP / BOOLEAN 子层与父级同坐标空间；有 png 时 localOffset 不再减父原点，
- * full 导出须在此预换算为相对父盒的 left/top。
- */
-function applyFlatParentRelativeOffset(
-  node: SceneNode,
-  layout: NodeInfo['layout'],
-): void {
-  const parent = node.parent
-  if (
-    !parent ||
-    parent.type === 'PAGE' ||
-    parent.type === 'DOCUMENT' ||
-    (parent.type !== 'GROUP' && parent.type !== 'BOOLEAN_OPERATION')
-  ) {
-    return
-  }
-  if (!('x' in parent) || !('y' in parent)) return
-  layout.x = (layout.x ?? 0) - parent.x
-  layout.y = (layout.y ?? 0) - parent.y
-}
-
-/**
  * Inspect 切图/测量用的临时页：避免 clone/Frame 挂到当前页导致 Layers 面板闪烁。
  * 整次 inspect 复用同一页，结束时删除。
  */
@@ -1554,7 +1532,7 @@ async function exportNodePngForInspect(
   return {...result, exportInspectMode: 'cropped'}
 }
 
-/** Inspect 切图后写 layout：cropped 对齐 PNG；full 保留 getLayoutInfo 尺寸 */
+/** Inspect 切图后写 layout：cropped / full 均按视觉包围盒对齐 PNG */
 function applyInspectExportLayout(
   node: SceneNode,
   layout: NodeInfo['layout'],
@@ -1562,33 +1540,11 @@ function applyInspectExportLayout(
   exportDesignSize?: {width: number; height: number} | null,
   visualBounds?: {x: number; y: number; width: number; height: number} | null,
 ): 'full' | 'cropped' {
-  if (visualBounds) {
-    applyBakedVisualLayout(node, layout, exportDesignSize, visualBounds)
-    return shouldFullExportForInspect(node, pageWidth) ? 'full' : 'cropped'
-  }
-
-  if (shouldFullExportForInspect(node, pageWidth)) {
-    const ew = exportDesignSize?.width
-    const eh = exportDesignSize?.height
-    const exportMismatch =
-      typeof ew === 'number' &&
-      typeof eh === 'number' &&
-      ew > 0 &&
-      eh > 0 &&
-      (!approxEq(layout.width, ew) || !approxEq(layout.height, eh))
-    // full 模式优先保留节点盒；但若导出像素尺寸明显不同，
-    // 继续强塞原 layout 会把图缩小/放大，需回到视觉包围盒。
-    if (exportMismatch) {
-      applyBakedVisualLayout(node, layout, exportDesignSize)
-      return 'full'
-    }
-    layout.rotation = undefined
-    applyFlatParentRelativeOffset(node, layout)
-    layout.bakedVisual = true
-    return 'full'
-  }
-  applyBakedVisualLayout(node, layout, exportDesignSize)
-  return 'cropped'
+  // 一律用 absoluteBoundingBox 相对父盒定位。
+  // 勿再用 node.x − parent.x：水平翻转（scaleX=-1）时 node.x 落在视觉右缘，
+  // GROUP 子层会把 left 错写成约等于自身宽度（如 375），背景图与文字错位。
+  applyBakedVisualLayout(node, layout, exportDesignSize, visualBounds)
+  return shouldFullExportForInspect(node, pageWidth) ? 'full' : 'cropped'
 }
 
 async function exportNodeVectorAssets(

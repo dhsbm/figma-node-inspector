@@ -880,16 +880,6 @@
       };
     }
   }
-  function applyFlatParentRelativeOffset(node, layout) {
-    var _a, _b;
-    const parent = node.parent;
-    if (!parent || parent.type === "PAGE" || parent.type === "DOCUMENT" || parent.type !== "GROUP" && parent.type !== "BOOLEAN_OPERATION") {
-      return;
-    }
-    if (!("x" in parent) || !("y" in parent)) return;
-    layout.x = ((_a = layout.x) != null ? _a : 0) - parent.x;
-    layout.y = ((_b = layout.y) != null ? _b : 0) - parent.y;
-  }
   var INSPECT_SCRATCH_PAGE_NAME = "__node_inspector_scratch__";
   var inspectScratchPage = null;
   function cleanupOrphanScratchPages() {
@@ -1018,25 +1008,8 @@
     return __spreadProps(__spreadValues({}, result), { exportInspectMode: "cropped" });
   }
   function applyInspectExportLayout(node, layout, pageWidth, exportDesignSize, visualBounds) {
-    if (visualBounds) {
-      applyBakedVisualLayout(node, layout, exportDesignSize, visualBounds);
-      return shouldFullExportForInspect(node, pageWidth) ? "full" : "cropped";
-    }
-    if (shouldFullExportForInspect(node, pageWidth)) {
-      const ew = exportDesignSize == null ? void 0 : exportDesignSize.width;
-      const eh = exportDesignSize == null ? void 0 : exportDesignSize.height;
-      const exportMismatch = typeof ew === "number" && typeof eh === "number" && ew > 0 && eh > 0 && (!approxEq(layout.width, ew) || !approxEq(layout.height, eh));
-      if (exportMismatch) {
-        applyBakedVisualLayout(node, layout, exportDesignSize);
-        return "full";
-      }
-      layout.rotation = void 0;
-      applyFlatParentRelativeOffset(node, layout);
-      layout.bakedVisual = true;
-      return "full";
-    }
-    applyBakedVisualLayout(node, layout, exportDesignSize);
-    return "cropped";
+    applyBakedVisualLayout(node, layout, exportDesignSize, visualBounds);
+    return shouldFullExportForInspect(node, pageWidth) ? "full" : "cropped";
   }
   async function exportNodeVectorAssets(node, pageWidth) {
     const result = {};
