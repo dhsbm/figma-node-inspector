@@ -202,7 +202,7 @@ ZIP 导出时，节点内联 \`svg\` 会按内容 hash 去重写入 \`svgs/\` �
 |------|------|
 | \`characters\` | 文案 |
 | \`segments\` | 字符级分段（混色等）；含 \`characters\` \`start\` \`end\` \`fills\`，以及可选 \`fontSize\` / \`fontName\` / \`fontWeight\`。整段 \`fills\` 为 mixed 时节点级 \`styles.fills\` 为空，以本字段为准 |
-| \`fontSize\` \`fontWeight\` \`fontName{family,style}\` | 字体。序列化时 \`fontWeight\` **下限钳到 400**（PingFang SC Regular 等在 Figma 常报 300）；与顶层 \`fonts[].weight\`、生成侧 CSS 一致 |
+| \`fontSize\` \`fontWeight\` \`fontName{family,style}\` | 字体。序列化时 \`fontWeight\` **下限钳到 400**（PingFang SC Regular 等在 Figma 常报 300）；\`SF Pro Display\` / \`SF Pro Text\` / \`SF Pro Rounded\` 等统一为 \`SF Pro\`；与顶层 \`fonts[].weight\`、生成侧 CSS 一致 |
 | \`textAlignHorizontal\` / \`textAlignVertical\` | 对齐 |
 | \`letterSpacing\` \`lineHeight\` | 字距/行高。\`lineHeight\` 为 \`{unit,value?}\`（\`PIXELS\` / \`PERCENT\` / \`AUTO\`）或 \`mixed\` |
 | \`lineHeightPx\` | 仅当 \`lineHeight.unit === 'AUTO'\`（或 mixed 且可估算）时写入：插件用单行文案探针测得的像素行高（见下） |

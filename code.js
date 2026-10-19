@@ -719,7 +719,7 @@
       styles.text = {
         characters: textNode.characters,
         fontSize: textNode.fontSize === figma.mixed ? void 0 : textNode.fontSize,
-        fontName: textNode.fontName === figma.mixed ? void 0 : textNode.fontName,
+        fontName: textNode.fontName === figma.mixed ? void 0 : normalizeFontName(textNode.fontName),
         fontWeight: textNode.fontWeight === figma.mixed ? void 0 : normalizeFontWeight(textNode.fontWeight),
         textAlignHorizontal: textNode.textAlignHorizontal,
         textAlignVertical: textNode.textAlignVertical,
@@ -758,7 +758,7 @@
         end: seg.end,
         fills: (seg.fills || []).map(serializePaint),
         fontSize: seg.fontSize,
-        fontName: seg.fontName,
+        fontName: normalizeFontName(seg.fontName),
         fontWeight: normalizeFontWeight(seg.fontWeight)
       }));
     } catch (e) {
@@ -1393,6 +1393,17 @@
       if (!asset.source) asset.source = "fill";
     }
   }
+  function normalizeFontFamily(family) {
+    const f = String(family || "").toLowerCase();
+    if (f.includes("sf pro")) return "SF Pro";
+    return family;
+  }
+  function normalizeFontName(fontName) {
+    if (!(fontName == null ? void 0 : fontName.family)) return fontName;
+    const family = normalizeFontFamily(fontName.family);
+    if (family === fontName.family) return fontName;
+    return { family, style: fontName.style };
+  }
   function isSystemFontFamily(family) {
     const f = family.toLowerCase();
     return f.includes("sf pro") || f.includes("sf compact") || f.includes("sf mono") || f.includes("new york") || f.startsWith(".sf") || f.includes("pingfang") || f.includes("helvetica") || f.includes("apple color emoji") || f === "system-ui";
@@ -1422,14 +1433,15 @@
     const map = /* @__PURE__ */ new Map();
     const addFontRef = (fontName, fontWeight) => {
       if (!(fontName == null ? void 0 : fontName.family)) return;
+      const family = normalizeFontFamily(fontName.family);
       const style = fontName.style || "Regular";
-      const key = `${fontName.family}::${style}`;
+      const key = `${family}::${style}`;
       if (!map.has(key)) {
         map.set(key, {
-          family: fontName.family,
+          family,
           style,
           weight: normalizeFontWeight(fontWeight),
-          provider: resolveFontProvider(fontName.family)
+          provider: resolveFontProvider(family)
         });
       }
     };

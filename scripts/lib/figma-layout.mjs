@@ -135,6 +135,16 @@ export function isItalicFontStyle(style) {
   return s.includes('italic') || s.includes('oblique')
 }
 
+/**
+ * SF Pro Display / Text / Rounded 等光学尺寸变体统一为 SF Pro，
+ * 与插件序列化侧 normalizeFontFamily 保持一致。
+ */
+export function normalizeFontFamily(family) {
+  const f = String(family || '').toLowerCase()
+  if (f.includes('sf pro')) return 'SF Pro'
+  return family
+}
+
 export function esc(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
@@ -1779,18 +1789,19 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
     const addRef = (ref) => {
       if (!ref?.family) return
+      const family = normalizeFontFamily(ref.family)
       const weight = cssFontWeight(ref.weight) ?? MIN_CSS_FONT_WEIGHT
       const italic = isItalicFontStyle(ref.style)
       if (
-        isSystemFontFamily(ref.family) &&
-        String(ref.family).toLowerCase().includes('sf pro')
+        isSystemFontFamily(family) &&
+        String(family).toLowerCase().includes('sf pro')
       ) {
         sfProWeights.add(weight)
         return
       }
-      if (isSystemFontFamily(ref.family)) return
+      if (isSystemFontFamily(family)) return
       if (ref.provider && ref.provider !== 'google') return
-      const googleFamily = GOOGLE_FONT_FAMILY_MAP[ref.family]
+      const googleFamily = GOOGLE_FONT_FAMILY_MAP[family]
       if (!googleFamily) return
       const bucket = ensureFamily(googleFamily)
       if (italic) bucket.italic.add(weight)
@@ -1805,13 +1816,12 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         if (node.visible === false) return
         const fontName = node.styles?.text?.fontName
         if (fontName?.family) {
+          const family = normalizeFontFamily(fontName.family)
           addRef({
-            family: fontName.family,
+            family,
             style: fontName.style,
             weight: node.styles?.text?.fontWeight,
-            provider: GOOGLE_FONT_FAMILY_MAP[fontName.family]
-              ? 'google'
-              : 'unknown',
+            provider: GOOGLE_FONT_FAMILY_MAP[family] ? 'google' : 'unknown',
           })
         }
         for (const child of node.children || []) walk(child)
@@ -1856,14 +1866,14 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
   /**
    * CSS font-family 栈：
-   * 1. 始终以 Figma 上的 family 名为第一候选
+   * 1. 始终以（归一化后的）Figma family 为第一候选
    * 2. 兼容/回退字体只能排在后面，不得覆盖设计字体
    */
   function fontFamily(fontName) {
     if (!fontName?.family) {
       return '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif'
     }
-    const family = fontName.family
+    const family = normalizeFontFamily(fontName.family)
     const lower = family.toLowerCase()
     const stack = []
     const pushUnique = (name) => {
@@ -1873,7 +1883,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       stack.push(name)
     }
 
-    // 1. Figma 设计字体名始终第一
+    // 1. 设计字体名始终第一（SF Pro Display/Text 等已归一为 SF Pro）
     pushUnique(family)
 
     // 2. Google Fonts CDN 别名（与 Figma 名不同时，便于匹配已加载字体）

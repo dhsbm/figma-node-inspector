@@ -1114,7 +1114,9 @@ async function getStylesInfo(node: SceneNode): Promise<NodeInfo['styles']> {
       fontSize:
         textNode.fontSize === figma.mixed ? undefined : textNode.fontSize,
       fontName:
-        textNode.fontName === figma.mixed ? undefined : textNode.fontName,
+        textNode.fontName === figma.mixed
+          ? undefined
+          : normalizeFontName(textNode.fontName),
       fontWeight:
         textNode.fontWeight === figma.mixed
           ? undefined
@@ -1166,7 +1168,7 @@ function serializeTextSegments(
       end: seg.end,
       fills: (seg.fills || []).map(serializePaint),
       fontSize: seg.fontSize,
-      fontName: seg.fontName,
+      fontName: normalizeFontName(seg.fontName),
       fontWeight: normalizeFontWeight(seg.fontWeight),
     }))
   } catch {
@@ -2059,6 +2061,25 @@ function applyImageRefCounts(
   }
 }
 
+/**
+ * SF Pro Display / Text / Rounded 等光学尺寸变体统一为 SF Pro，
+ * 避免 fonts 列表与 CSS font-family 出现多个等价族名。
+ */
+function normalizeFontFamily(family: string): string {
+  const f = String(family || '').toLowerCase()
+  if (f.includes('sf pro')) return 'SF Pro'
+  return family
+}
+
+function normalizeFontName(
+  fontName: FontName | undefined,
+): FontName | undefined {
+  if (!fontName?.family) return fontName
+  const family = normalizeFontFamily(fontName.family)
+  if (family === fontName.family) return fontName
+  return {family, style: fontName.style}
+}
+
 /** 本机/系统字体：不走 CDN，由浏览器 font-family 回退栈解析 */
 function isSystemFontFamily(family: string): boolean {
   const f = family.toLowerCase()
@@ -2111,14 +2132,15 @@ function collectFontsUsed(nodes: NodeInfo[]): FontRef[] {
     fontWeight: number | undefined,
   ) => {
     if (!fontName?.family) return
+    const family = normalizeFontFamily(fontName.family)
     const style = fontName.style || 'Regular'
-    const key = `${fontName.family}::${style}`
+    const key = `${family}::${style}`
     if (!map.has(key)) {
       map.set(key, {
-        family: fontName.family,
+        family,
         style,
         weight: normalizeFontWeight(fontWeight),
-        provider: resolveFontProvider(fontName.family),
+        provider: resolveFontProvider(family),
       })
     }
   }
