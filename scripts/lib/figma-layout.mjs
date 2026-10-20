@@ -1098,15 +1098,32 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
   }
 
   /**
+   * 子树内是否存在「会被渲成 position:absolute」的节点（含嵌套，不含自身）。
+   * 自由定位父级下 layoutPositioning=AUTO 的子项在 HTML 里也是 absolute，
+   * 不能只看 ABSOLUTE 标记。
+   */
+  function subtreeHasRenderedAbsolute(node) {
+    const parentIsAuto = !!node.layout?.layoutMode
+    for (const child of node.children || []) {
+      if (child.visible === false) continue
+      const childAbsolute =
+        !parentIsAuto || child.layout?.layoutPositioning === 'ABSOLUTE'
+      if (childAbsolute) return true
+      if (subtreeHasRenderedAbsolute(child)) return true
+    }
+    return false
+  }
+
+  /**
    * 按 Figma 图层顺序写 z-index（先声明在下、后声明在上）。
    *
-   * 1) Auto Layout 内混有 ABSOLUTE 子项：CSS 会把 absolute 画在普通流之上，
-   *    需显式 z-index；流式子项补 position:relative。
+   * 1) Auto Layout 内混有 ABSOLUTE 子项，或流式子项**子树**里会渲成 absolute：
+   *    嵌套 abspos（如 logo 内铺满卡片的 Frame）写了 z-index 后会泄漏到 AL
+   *    祖先，盖住后面的流式兄弟（footer 被头像区挡住）。给 AL 流式兄弟都
+   *    写 z-index + position:relative，把子树层级关进各自 stacking context。
    * 2) 自由定位（非 AL）父级：子项虽均为 absolute，但若某子树内部又写了
-   *    z-index（例如嵌套 AL+ABSOLUTE），而该子项自身 z-index:auto，则
-   *    **不会**形成 stacking context，子级 z-index 会泄漏到祖先，盖住
-   *    后面的蒙层/弹窗。给自由定位兄弟都写上 z-index，既对齐 Figma，
-   *    也把子树层级关进各自的 stacking context。
+   *    z-index，而该子项自身 z-index:auto，则同样会泄漏；给自由定位兄弟
+   *    都写上 z-index，对齐 Figma。
    */
   function appendSiblingStackOrder(
     css,
@@ -1120,10 +1137,12 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     if (siblings.length <= 1) return
 
     if (parentAutoLayout) {
-      const hasAbsoluteSibling = siblings.some(
-        (c) => c.layout?.layoutPositioning === 'ABSOLUTE',
+      const needsStackOrder = siblings.some(
+        (c) =>
+          c.layout?.layoutPositioning === 'ABSOLUTE' ||
+          subtreeHasRenderedAbsolute(c),
       )
-      if (!hasAbsoluteSibling) return
+      if (!needsStackOrder) return
     }
 
     const index = siblings.findIndex((c) => c.id === node.id)
