@@ -396,6 +396,8 @@ export function generateHtmlDocument(data, options = {}) {
       typeof styleResult === 'string' ? null : styleResult.strokeOverlay
     const gradientBorderMask =
       typeof styleResult === 'string' ? null : styleResult.gradientBorderMask
+    const textInnerCss =
+      typeof styleResult === 'string' ? null : styleResult.textInnerCss
     const cls = classNameFor(node)
     let attrs = [
       `class="${cls}"`,
@@ -498,9 +500,13 @@ export function generateHtmlDocument(data, options = {}) {
     const childCtx = {itemRoot: listItemRoot}
 
     if (node.type === 'TEXT') {
-      inner = renderTextHtmlContent
+      const textBody = renderTextHtmlContent
         ? renderTextHtmlContent(node, esc)
         : esc(node.styles?.text?.characters || '')
+      // Skew + background-clip:text 同元素会裁字脚；内层只做填色/clip
+      inner = textInnerCss
+        ? `<span style="${esc(textInnerCss)}">${textBody}</span>`
+        : textBody
     } else if (node.children?.length && !node.flattened) {
       inner = node.children
         .map((child) => renderNode(child, node, childAuto, false, childCtx))

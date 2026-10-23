@@ -80,7 +80,11 @@ export function contentOverflowPad(root) {
 /**
  * 把渲染好的根 HTML 包进扩容画布，避免负坐标描边被父级/对比框裁切。
  */
-export function wrapHtmlForContentOverflow(bodyHtml, root, uxFn = (n) => `${round(n)}px`) {
+export function wrapHtmlForContentOverflow(
+  bodyHtml,
+  root,
+  uxFn = (n) => `${round(n)}px`,
+) {
   const pad = contentOverflowPad(root)
   if (!pad.needed) {
     return {
@@ -133,16 +137,6 @@ export function isItalicFontStyle(style) {
   if (!style || typeof style !== 'string') return false
   const s = style.toLowerCase()
   return s.includes('italic') || s.includes('oblique')
-}
-
-/**
- * SF Pro Display / Text / Rounded 等光学尺寸变体统一为 SF Pro，
- * 与插件序列化侧 normalizeFontFamily 保持一致。
- */
-export function normalizeFontFamily(family) {
-  const f = String(family || '').toLowerCase()
-  if (f.includes('sf pro')) return 'SF Pro'
-  return family
 }
 
 export function esc(str) {
@@ -219,11 +213,7 @@ export function multiplyHexAlpha(hex, opacity = 1) {
   }
   if ([r, g, b].some((n) => Number.isNaN(n))) return hex
   a = Math.max(0, Math.min(1, a * opacity))
-  const toHex = (n) =>
-    Math.round(n)
-      .toString(16)
-      .padStart(2, '0')
-      .toUpperCase()
+  const toHex = (n) => Math.round(n).toString(16).padStart(2, '0').toUpperCase()
   const rgb = `#${toHex(r)}${toHex(g)}${toHex(b)}`
   if (a >= 1) return rgb
   return `${rgb}${toHex(a * 255)}`
@@ -273,8 +263,7 @@ function projectPointOntoLine(point, lineStart, lineEnd) {
  */
 export function linearGradientPaintToCss(paint, width, height) {
   if (!paint?.stops?.length) return null
-  const paintOpacity =
-    typeof paint.opacity === 'number' ? paint.opacity : 1
+  const paintOpacity = typeof paint.opacity === 'number' ? paint.opacity : 1
   if (paint.stops.length === 1) {
     return gradientStopColor(paint.stops[0], paintOpacity)
   }
@@ -378,8 +367,7 @@ export function linearGradientPaintToCss(paint, width, height) {
  */
 export function radialGradientPaintToCss(paint, width, height) {
   if (!paint?.stops?.length) return null
-  const paintOpacity =
-    typeof paint.opacity === 'number' ? paint.opacity : 1
+  const paintOpacity = typeof paint.opacity === 'number' ? paint.opacity : 1
   const stops = paint.stops
     .map(
       (s) =>
@@ -483,8 +471,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     )
     if (!hasBlur) return false
     return visiblePaints(styles.fills).some(
-      (p) =>
-        p.type === 'GRADIENT_LINEAR' || p.type === 'GRADIENT_RADIAL',
+      (p) => p.type === 'GRADIENT_LINEAR' || p.type === 'GRADIENT_RADIAL',
     )
   }
 
@@ -694,9 +681,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
           `drop-shadow(${ux(x)} ${ux(y)} ${ux(filterBlur)} ${color})`,
         )
       } else {
-        boxParts.push(
-          `${ux(x)} ${ux(y)} ${ux(blur)} ${ux(spread)} ${color}`,
-        )
+        boxParts.push(`${ux(x)} ${ux(y)} ${ux(blur)} ${ux(spread)} ${color}`)
       }
     }
     return {
@@ -926,6 +911,167 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
   }
 
   /**
+   * layout.transform = Figma [[m00,m01],[m10,m11]]（单位轴，可含 skew）。
+   * CSS matrix(a,b,c,d) 对应 x'=ax+cy, y'=bx+dy → matrix(m00, m10, m01, m11)。
+   */
+  function cssMatrixFromLayoutTransform(transform) {
+    if (!Array.isArray(transform) || transform.length !== 2) return null
+    const row0 = transform[0]
+    const row1 = transform[1]
+    if (!Array.isArray(row0) || !Array.isArray(row1)) return null
+    if (row0.length < 2 || row1.length < 2) return null
+    const m00 = round(row0[0])
+    const m01 = round(row0[1])
+    const m10 = round(row1[0])
+    const m11 = round(row1[1])
+    return `matrix(${m00}, ${m10}, ${m01}, ${m11}, 0, 0)`
+  }
+
+  function hasLayoutSkew(layout) {
+    if (cssMatrixFromLayoutTransform(layout?.transform)) return true
+    if (typeof layout?.skewX === 'number' && Math.abs(layout.skewX) > 0.01) {
+      return true
+    }
+    if (typeof layout?.skewY === 'number' && Math.abs(layout.skewY) > 0.01) {
+      return true
+    }
+    return false
+  }
+
+  /**
+   * 无 transform 矩阵时的兜底：按 Figma 单位轴形式重建纯 skew
+   *（θ → matrix(1,0,sinθ,cosθ)；与 CSS skewX 的 tan 形式不同）。
+   */
+  function cssMatrixFromSkewAngles(skewXDeg, skewYDeg) {
+    const sx =
+      typeof skewXDeg === 'number' && Math.abs(skewXDeg) > 0.01
+        ? (skewXDeg * Math.PI) / 180
+        : 0
+    const sy =
+      typeof skewYDeg === 'number' && Math.abs(skewYDeg) > 0.01
+        ? (skewYDeg * Math.PI) / 180
+        : 0
+    if (!sx && !sy) return null
+    // 水平 skew：y 轴倾倒；垂直 skew：x 轴倾倒（单位轴）
+    const m00 = sy ? Math.cos(sy) : 1
+    const m10 = sy ? Math.sin(sy) : 0
+    const m01 = sx ? Math.sin(sx) : 0
+    const m11 = sx ? Math.cos(sx) : 1
+    return `matrix(${round(m00)}, ${round(m10)}, ${round(m01)}, ${round(m11)}, 0, 0)`
+  }
+
+  function layoutTransformMatrix2x2(layout) {
+    if (Array.isArray(layout?.transform) && layout.transform.length === 2) {
+      const row0 = layout.transform[0]
+      const row1 = layout.transform[1]
+      if (
+        Array.isArray(row0) &&
+        Array.isArray(row1) &&
+        row0.length >= 2 &&
+        row1.length >= 2
+      ) {
+        return [
+          [Number(row0[0]) || 0, Number(row0[1]) || 0],
+          [Number(row1[0]) || 0, Number(row1[1]) || 0],
+        ]
+      }
+    }
+    const sx =
+      typeof layout?.skewX === 'number' ? (layout.skewX * Math.PI) / 180 : 0
+    const sy =
+      typeof layout?.skewY === 'number' ? (layout.skewY * Math.PI) / 180 : 0
+    if (!sx && !sy) return null
+    return [
+      [sy ? Math.cos(sy) : 1, sx ? Math.sin(sx) : 0],
+      [sy ? Math.sin(sy) : 0, sx ? Math.cos(sx) : 1],
+    ]
+  }
+
+  /**
+   * skew 后局部盒角点超出 width×height；再叠加字号>行高时 p/g/y 字脚溢出。
+   * CSS transform 与 background-clip:text 易按未变换盒裁切 → padding 扩绘制区，
+   * 负 margin 保持锚点；原点须对齐内容区左上（见 transform-origin）。
+   */
+  function skewPaintInset(layout, node) {
+    const m = layoutTransformMatrix2x2(layout)
+    if (!m) return null
+    const [[m00, m01], [m10, m11]] = m
+    const w = typeof layout.width === 'number' ? layout.width : 0
+    const h = typeof layout.height === 'number' ? layout.height : 0
+    if (!(w > 0 || h > 0)) return null
+
+    let minX = 0
+    let maxX = w
+    let minY = 0
+    let maxY = h
+    for (const [x, y] of [
+      [0, 0],
+      [w, 0],
+      [w, h],
+      [0, h],
+    ]) {
+      const xp = m00 * x + m01 * y
+      const yp = m10 * x + m11 * y
+      minX = Math.min(minX, xp)
+      maxX = Math.max(maxX, xp)
+      minY = Math.min(minY, yp)
+      maxY = Math.max(maxY, yp)
+    }
+
+    const fontSize = node?.styles?.text?.fontSize
+    const isText = node?.type === 'TEXT'
+    const base =
+      typeof fontSize === 'number' && fontSize > 0
+        ? fontSize
+        : Math.max(h, 12)
+    // 水平：剪切外溢 + sidebearing
+    const fudgeX = Math.max(3, Math.ceil(base * 0.12))
+    // 垂直：字号大于行盒时的上下溢出 + 字脚（p/g/y ≈0.25em）
+    let glyphTop = 0
+    let glyphBottom = 0
+    if (isText && typeof fontSize === 'number') {
+      const tight = Math.max(0, fontSize - (h || fontSize))
+      glyphTop = tight / 2 + fontSize * 0.12
+      glyphBottom = tight / 2 + fontSize * 0.35
+    }
+    const fudgeY = Math.max(2, Math.ceil(base * 0.08))
+
+    const left = Math.max(0, round(-minX)) + fudgeX
+    const right = Math.max(0, round(maxX - w)) + fudgeX
+    const top = Math.max(0, round(-minY)) + round(glyphTop) + fudgeY
+    const bottom = Math.max(0, round(maxY - h)) + round(glyphBottom) + fudgeY
+    if (left === 0 && right === 0 && top === 0 && bottom === 0) return null
+    return {left, right, top, bottom}
+  }
+
+  /**
+   * Skew 文字若 line-height < font-size，background-clip:text 会裁掉字脚。
+   * 行高抬到 fontSize，并用 shiftY 把行盒中心钉回原稿行盒。
+   */
+  function skewedTextLineBoxFix(node, layout) {
+    if (node?.type !== 'TEXT' || !hasLayoutSkew(layout)) return null
+    const text = node.styles?.text
+    const fs = text?.fontSize
+    if (typeof fs !== 'number' || !(fs > 0)) return null
+    const lhCss = resolveLineHeightCssValue(
+      {...text, fontSize: fs},
+      layout,
+      (n) => n,
+    )
+    let lh = typeof layout.height === 'number' ? layout.height : fs
+    if (typeof lhCss === 'number') lh = lhCss
+    else if (typeof lhCss === 'string' && lhCss.endsWith('px')) {
+      const n = parseFloat(lhCss)
+      if (Number.isFinite(n)) lh = n
+    }
+    if (!(fs > lh + 0.5)) return null
+    return {
+      lineHeightPx: fs,
+      shiftY: round((lh - fs) / 2),
+    }
+  }
+
+  /**
    * CSS rotate（Y 向下、正角顺时针）绕 top-left 后的轴对齐包围盒。
    * 用于：旧 JSON 已带 png 但仍残留 rotation 时，把坐标改成与像素一致。
    * `deg` 须为 CSS 角度（即 `-layout.rotation`），不是 Figma 原值。
@@ -961,7 +1107,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     }
   }
 
-  /** 已烘焙视觉的节点：用 AABB 尺寸/位置，不再叠 rotate */
+  /** 已烘焙视觉的节点：用 AABB 尺寸/位置，不再叠 rotate/skew */
   function effectiveLayout(node) {
     const layout = {...(node.layout || {})}
     const visualBaked = !!(
@@ -976,7 +1122,8 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     if (
       !layout.bakedVisual &&
       typeof layout.rotation === 'number' &&
-      Math.abs(layout.rotation) > 0.01
+      Math.abs(layout.rotation) > 0.01 &&
+      !hasLayoutSkew(layout)
     ) {
       const box = aabbAfterCssRotate(
         layout.x ?? 0,
@@ -991,6 +1138,9 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       layout.height = box.height
     }
     layout.rotation = undefined
+    layout.skewX = undefined
+    layout.skewY = undefined
+    layout.transform = undefined
     return {layout, visualBaked: true}
   }
 
@@ -1025,9 +1175,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
   /** Auto Layout 中参与主轴排布的子项（绝对定位不占位） */
   function flowAutoLayoutChildren(node) {
     return (node.children || []).filter(
-      (c) =>
-        c.visible !== false &&
-        c.layout?.layoutPositioning !== 'ABSOLUTE',
+      (c) => c.visible !== false && c.layout?.layoutPositioning !== 'ABSOLUTE',
     )
   }
 
@@ -1286,13 +1434,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       css.push('position:relative')
     }
 
-    appendSiblingStackOrder(
-      css,
-      node,
-      parent,
-      parentAutoLayout,
-      useAbsolute,
-    )
+    appendSiblingStackOrder(css, node, parent, parentAutoLayout, useAbsolute)
 
     if (parentAutoLayout && !useAbsolute && layout.layoutGrow) {
       css.push(`flex-grow:${layout.layoutGrow}`)
@@ -1309,10 +1451,11 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
     }
 
     const transforms = []
-    // 切图（png/svg/flattened）像素已含旋转；effectiveLayout 已改包围盒并清 rotation。
-    // 未烘焙时：位图填充的 imageHash 是源图，节点旋转应靠导出侧切图烘焙，
-    // 这里不再用 CSS rotate 去「猜」——AL 原点与 Figma 不一致，易旋出裁剪区。
-    // 仅对无位图填充的未烘焙节点保留 CSS rotate 兜底。
+    // 切图（png/svg/flattened）像素已含旋转/剪切；effectiveLayout 已改包围盒并清仿射字段。
+    // 未烘焙时：位图填充的 imageHash 是源图，节点变换应靠导出侧切图烘焙，
+    // 这里不再用 CSS 去「猜」——AL 原点与 Figma 不一致，易旋出裁剪区。
+    // 仅对无位图填充的未烘焙节点保留 CSS matrix/rotate 兜底。
+    // Skew 插件：layout.transform / skewX·skewY → CSS matrix（含单位轴剪切）。
     const hasImageFill = (styles.fills || []).some(
       (paint) =>
         paint &&
@@ -1321,7 +1464,16 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         paint.imageHash,
     )
     let rotateAroundCenter = false
-    if (
+    if (!visualBaked && !hasImageFill && hasLayoutSkew(layout)) {
+      const matrixCss =
+        cssMatrixFromLayoutTransform(layout.transform) ||
+        cssMatrixFromSkewAngles(layout.skewX, layout.skewY)
+      if (matrixCss) {
+        transforms.push(matrixCss)
+        // matrix 已含 rotation，勿再叠 rotate
+        rotateAroundCenter = parentAutoLayout && !useAbsolute
+      }
+    } else if (
       !visualBaked &&
       !hasImageFill &&
       typeof layout.rotation === 'number' &&
@@ -1390,8 +1542,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         : null
     const strokeColor = typeof strokeBg === 'string' ? strokeBg : null
     const strokeIsGradient = cssLooksLikeGradient(strokeColor)
-    const strokePaint =
-      strokeWeight > 0 ? strokes[strokes.length - 1] : null
+    const strokePaint = strokeWeight > 0 ? strokes[strokes.length - 1] : null
     // 单边描边改走绝对定位细线（见 strokeOverlay），避免被盖住/裁切
     let strokeOverlay = null
     // 渐变描边 + 半透明填充：用 mask 只画边框环（见 gradientBorderMask）
@@ -1422,11 +1573,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
     // 导出的 SVG/PNG 已含 fill/stroke，重复映射会把图标覆盖成色块。
     // 矮模糊光条例外：用 fills + CSS blur，避免 PNG 再模糊发暗。
-    if (
-      !node.svg &&
-      !node.png &&
-      (!node.pngRef || preferCssBlurGradient)
-    ) {
+    if (!node.svg && !node.png && (!node.pngRef || preferCssBlurGradient)) {
       const imageLayers = imageBackgrounds(
         styles.fills,
         layout.width,
@@ -1443,13 +1590,9 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         layout.height,
       )
       if (imageLayers.length) {
-        const images = imageLayers.map(
-          (layer) => `url("${layer.image}")`,
-        )
+        const images = imageLayers.map((layer) => `url("${layer.image}")`)
         const sizes = imageLayers.map((layer) => layer.size)
-        const positions = imageLayers.map(
-          (layer) => layer.position || 'center',
-        )
+        const positions = imageLayers.map((layer) => layer.position || 'center')
         const repeats = imageLayers.map((layer) => layer.repeat)
         const clips = imageLayers.map(() => 'padding-box')
         const origins = imageLayers.map(() => 'border-box')
@@ -1473,11 +1616,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         const fillLayers = colorLayers.length
           ? colorLayers
           : typeof bg === 'string'
-            ? [
-                cssLooksLikeGradient(bg)
-                  ? bg
-                  : solidColorAsGradientLayer(bg),
-              ]
+            ? [cssLooksLikeGradient(bg) ? bg : solidColorAsGradientLayer(bg)]
             : [solidColorAsGradientLayer('transparent')]
         const layers = [...fillLayers, strokeColor]
         css.push(`background-image:${layers.join(',')}`)
@@ -1558,9 +1697,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       } else {
         css.push('border-style:solid')
         css.push(`border-color:${strokeColor}`)
-        css.push(
-          `border-width:${ux(t)} ${ux(r)} ${ux(b)} ${ux(l)}`,
-        )
+        css.push(`border-width:${ux(t)} ${ux(r)} ${ux(b)} ${ux(l)}`)
       }
     } else if (
       strokeColor &&
@@ -1638,22 +1775,88 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       css.push(`-webkit-backdrop-filter:${blurs.backdrop}`)
     }
 
+    const lineBoxFix = skewedTextLineBoxFix(node, layout)
+    const skewTextSplit =
+      node.type === 'TEXT' &&
+      hasLayoutSkew(layout) &&
+      transforms.length > 0 &&
+      !rotateAroundCenter
+    let textInnerCss = null
     if (transforms.length) {
       css.push(`transform:${transforms.join(' ')}`)
-      // AL flex 子项：center（对齐 Figma 布局槽内视觉）
-      // 绝对定位：top left（对齐 relativeTransform / node.x·y）
-      css.push(
-        rotateAroundCenter
-          ? 'transform-origin:center'
-          : 'transform-origin:top left',
-      )
+      if (skewTextSplit) {
+        // 外层：transform + 扩盒 padding；内层：bg-clip（二者同元素会裁 p 字脚）
+        const inset = skewPaintInset(layout, node) || {
+          top: 2,
+          right: 2,
+          bottom: 4,
+          left: 2,
+        }
+        const padT = Math.max(inset.top, 2)
+        const padR = Math.max(inset.right, 2)
+        const padB = Math.max(inset.bottom, 4)
+        const padL = Math.max(inset.left, 2)
+        css.push(`transform-origin:${ux(padL)} ${ux(padT)}`)
+        css.push('overflow:visible')
+        css.push(`padding:${ux(padT)} ${ux(padR)} ${ux(padB)} ${ux(padL)}`)
+        let mTop = -padT
+        let mBottom = -padB
+        if (lineBoxFix?.shiftY) {
+          mTop += lineBoxFix.shiftY
+          mBottom -= lineBoxFix.shiftY
+        }
+        css.push(
+          `margin:${ux(mTop)} ${ux(-padR)} ${ux(mBottom)} ${ux(-padL)}`,
+        )
+      } else {
+        css.push(
+          rotateAroundCenter
+            ? 'transform-origin:center'
+            : 'transform-origin:top left',
+        )
+      }
     }
 
     if (node.type === 'TEXT') {
-      // p 有默认 margin，设计稿还原必须清零
-      css.push('margin:0')
-      css.push(...textStyleCss(node))
-      css.push(...textWrapCss(node))
+      if (!skewTextSplit) css.push('margin:0')
+      let textCss = textStyleCss(node)
+      if (lineBoxFix) {
+        textCss = textCss.filter((s) => !String(s).startsWith('line-height:'))
+        textCss.push(`line-height:${ux(lineBoxFix.lineHeightPx)}`)
+      }
+      if (skewTextSplit) {
+        const fillKeys = new Set([
+          'color',
+          'background',
+          'background-image',
+          'background-size',
+          'background-position',
+          'background-repeat',
+          'background-clip',
+          '-webkit-background-clip',
+          '-webkit-text-fill-color',
+          'text-shadow',
+        ])
+        const fillParts = []
+        const kept = []
+        for (const part of css) {
+          const key = String(part).split(':')[0].trim()
+          if (fillKeys.has(key)) fillParts.push(part)
+          else kept.push(part)
+        }
+        css.length = 0
+        css.push(...kept)
+        // 内层：仅排版 + 填色 clip，不加 transform / 负 margin
+        textInnerCss = [
+          'display:block',
+          ...textCss,
+          ...textWrapCss(node),
+          ...fillParts,
+        ].join(';')
+      } else {
+        css.push(...textCss)
+        css.push(...textWrapCss(node))
+      }
     }
 
     return {
@@ -1661,6 +1864,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       isolatedFilter,
       strokeOverlay,
       gradientBorderMask,
+      textInnerCss,
     }
   }
 
@@ -1808,7 +2012,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
     const addRef = (ref) => {
       if (!ref?.family) return
-      const family = normalizeFontFamily(ref.family)
+      const family = ref.family
       const weight = cssFontWeight(ref.weight) ?? MIN_CSS_FONT_WEIGHT
       const italic = isItalicFontStyle(ref.style)
       if (
@@ -1835,7 +2039,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
         if (node.visible === false) return
         const fontName = node.styles?.text?.fontName
         if (fontName?.family) {
-          const family = normalizeFontFamily(fontName.family)
+          const family = fontName.family
           addRef({
             family,
             style: fontName.style,
@@ -1885,14 +2089,14 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
 
   /**
    * CSS font-family 栈：
-   * 1. 始终以（归一化后的）Figma family 为第一候选
+   * 1. 始终以 Figma 指定的 family 为第一候选
    * 2. 兼容/回退字体只能排在后面，不得覆盖设计字体
    */
   function fontFamily(fontName) {
     if (!fontName?.family) {
       return '"PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif'
     }
-    const family = normalizeFontFamily(fontName.family)
+    const family = fontName.family
     const lower = family.toLowerCase()
     const stack = []
     const pushUnique = (name) => {
@@ -1902,7 +2106,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       stack.push(name)
     }
 
-    // 1. 设计字体名始终第一（SF Pro Display/Text 等已归一为 SF Pro）
+    // 1. 设计字体名始终第一（保留 SF Pro Display/Text 等指定族名）
     pushUnique(family)
 
     // 2. Google Fonts CDN 别名（与 Figma 名不同时，便于匹配已加载字体）
@@ -2018,7 +2222,7 @@ export function createFigmaLayout(imageMap = {}, options = {}) {
       .join('')
   }
 
-return {
+  return {
     buildStyle,
     classNameFor,
     textTagName,

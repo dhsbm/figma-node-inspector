@@ -3,7 +3,7 @@
  * 单一来源：插件「JSON 说明」、exportJson 附带文件、docs/ 均可由此生成。
  */
 
-export const NODE_JSON_SCHEMA_DOC_VERSION = '1.0.9'
+export const NODE_JSON_SCHEMA_DOC_VERSION = '1.0.10'
 
 export function getNodeJsonSchemaDoc() {
   return `# Node Inspector — 导出 JSON 结构说明
@@ -128,7 +128,9 @@ Figma 布尔减（区域挖空、透视下层）等效果 **HTML/CSS 无等价�
 | \`parentX\` \`parentY\` | **始终**相对直接父盒（px）。根为 \`0,0\`。写 CSS \`left/top\` 用这对字段，不必再按 baked / GROUP 分支减父 |
 | \`rootX\` \`rootY\` | 相对选区根（\`nodes[0]\`）左上角（px）。根为 \`0,0\`。钉位/对稿用；**不要**当父级 \`left/top\` |
 | \`rotation\` | Figma 角度（Plugin API，Y 向下时正角逆时针）。写 CSS \`rotate()\` 时取反。\`exportAsync\` 切图已含旋转，烘焙后清除。位图填充+旋转在导出侧会自动切图 |
-| \`bakedVisual\` | 见 §3.2。为 \`true\` 时 layout 已是相对父盒偏移 + 切图对齐尺寸；切图像素已含旋转 → **勿重复减父.x/父.y**，**勿 CSS \`rotate\`** |
+| \`skewX\` \`skewY\` | 剪切角（度）。由 \`relativeTransform\` 分解；Skew 等插件写入后属性面板通常仍显示 rotation=0。有值时同时带 \`transform\` |
+| \`transform\` | \`[[m00,m01],[m10,m11]]\`（Figma 单位轴 2×2）。有 skew 时写出；HTML 用 CSS \`matrix(m00, m10, m01, m11)\` 还原（勿再叠 \`rotate\`）。烘焙后清除 |
+| \`bakedVisual\` | 见 §3.2。为 \`true\` 时 layout 已是相对父盒偏移 + 切图对齐尺寸；切图像素已含旋转/剪切 → **勿重复减父.x/父.y**，**勿再叠 CSS \`rotate\`/\`matrix\`** |
 | \`constraints\` | 约束 \`{horizontal, vertical}\` |
 | \`layoutMode\` | \`HORIZONTAL\` / \`VERTICAL\` → flex 方向 |
 | \`primaryAxisAlignItems\` / \`counterAxisAlignItems\` | 主轴/交叉轴对齐 |
@@ -202,7 +204,7 @@ ZIP 导出时，节点内联 \`svg\` 会按内容 hash 去重写入 \`svgs/\` �
 |------|------|
 | \`characters\` | 文案 |
 | \`segments\` | 字符级分段（混色等）；含 \`characters\` \`start\` \`end\` \`fills\`，以及可选 \`fontSize\` / \`fontName\` / \`fontWeight\`。整段 \`fills\` 为 mixed 时节点级 \`styles.fills\` 为空，以本字段为准 |
-| \`fontSize\` \`fontWeight\` \`fontName{family,style}\` | 字体。序列化时 \`fontWeight\` **下限钳到 400**（PingFang SC Regular 等在 Figma 常报 300）；\`SF Pro Display\` / \`SF Pro Text\` / \`SF Pro Rounded\` 等统一为 \`SF Pro\`；与顶层 \`fonts[].weight\`、生成侧 CSS 一致 |
+| \`fontSize\` \`fontWeight\` \`fontName{family,style}\` | 字体。序列化时 \`fontWeight\` **下限钳到 400**（PingFang SC Regular 等在 Figma 常报 300）；\`fontName.family\` 保留 Figma 指定族名（如 \`SF Pro Display\` / \`SF Pro Text\`）；与顶层 \`fonts[].weight\`、生成侧 CSS 一致 |
 | \`textAlignHorizontal\` / \`textAlignVertical\` | 对齐 |
 | \`letterSpacing\` \`lineHeight\` | 字距/行高。\`lineHeight\` 为 \`{unit,value?}\`（\`PIXELS\` / \`PERCENT\` / \`AUTO\`）或 \`mixed\` |
 | \`lineHeightPx\` | 仅当 \`lineHeight.unit === 'AUTO'\`（或 mixed 且可估算）时写入：插件用单行文案探针测得的像素行高（见下） |
@@ -248,7 +250,7 @@ ZIP 导出时，节点内联 \`svg\` 会按内容 hash 去重写入 \`svgs/\` �
 11. 含 \`htmlLayoutWarning\` 的节点：HTML 输出 \`data-html-layout-warning\` 等标记，**勿当作可直接上线的最终布局**；需按 \`suggestion\` 人工调层级或背景切图。
 12. 有 \`png\`/\`pngRef\` 时：像素里已含 \`INNER_SHADOW\` 与圆角 → **勿再写** \`box-shadow: inset\` 或 \`border-radius\`（「勿再写」= 勿重复叠加，非坐标换算）；外阴影对切图/透明 Group/文字用 \`filter: drop-shadow\`，有背景的盒子仍可用 CSS \`box-shadow\`。
 13. 子层盒相对根 AABB 负向溢出（外侧描边切图）：扩根画布并平移内容；对比页画布用扩后尺寸，但 \`design.png\` **按根帧宽度**对齐（勿拉满画布，否则长页会被放大）。
-14. 未烘焙的 \`layout.rotation\` 是 Figma 角度（Y 向下正角逆时针）；写 CSS \`rotate()\` 时取反，绝对定位原点用 \`top left\`。
+14. 未烘焙的 \`layout.rotation\` 是 Figma 角度（Y 向下正角逆时针）；写 CSS \`rotate()\` 时取反，绝对定位原点用 \`top left\`。有 \`layout.transform\` / skew 时用 CSS \`matrix\`（已含旋转），不要再叠 \`rotate\`。
 15. 渐变描边：CSS \`border-color\` 不支持 gradient。内侧描边输出 \`border: transparent\` + \`background-clip\`（填充 \`padding-box\`，描边 \`border-box\`）。
 16. 行高 AUTO：\`lineHeightPx\` 若≈多行盒高（探针未重排），生成侧改用盒高反推，避免把整段高度写成 \`line-height\`。
 
@@ -270,6 +272,7 @@ ZIP 导出时，节点内联 \`svg\` 会按内容 hash 去重写入 \`svgs/\` �
 
 字段可能随插件版本增减；以实际 JSON 为准。若某字段缺失，按可选处理，勿报错中断整树。
 
+- **1.0.10**：\`layout\` 增加 \`skewX\` / \`skewY\` / \`transform\`（识别 Skew 插件等写入的 \`relativeTransform\` 剪切）；HTML 用 CSS \`matrix\` 还原，含文字时不因 skew 整颗切图。
 - **1.0.9**：对比页 \`design.png\` 按根帧宽度对齐（溢出画布不再拉伸原稿）；渐变描边用 \`background-clip\`；AUTO 行高在 \`lineHeightPx\`≈盒高时回退反推。
 - **1.0.8**：每个节点 \`layout\` 增加 \`parentX\` / \`parentY\`（始终相对直接父盒，可直接当 CSS \`left/top\`）。\`x/y\` 旧语义不变。
 - **1.0.7**：每个节点 \`layout\` 增加 \`rootX\` / \`rootY\`（相对选区根节点原点；根为 \`0,0\`）。

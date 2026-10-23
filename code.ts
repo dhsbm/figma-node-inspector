@@ -381,8 +381,69 @@ function shouldBakeDenseVectorGroup(node: SceneNode): boolean {
   return stats.vectorishCount / stats.leafCount >= VECTOR_BAKE_RATIO
 }
 
+function roundLayoutNum(n: number): number {
+  return Math.round(n * 1000) / 1000
+}
+
+/**
+ * 从 relativeTransform 拆剪切角（Skew 插件等写入）。
+ * Figma 轴为单位向量且可不垂直；rotation = atan2(-m10,m00) 不含 skew。
+ * 去掉旋转后：纯水平 skew θ 的残余约为 [[1,sinθ],[0,cosθ]]。
+ */
+function extractLayoutSkew(node: SceneNode): {
+  skewX: number
+  skewY: number
+  transform: [[number, number], [number, number]]
+} | null {
+  if (!('relativeTransform' in node)) return null
+  const t = node.relativeTransform
+  const m00 = t[0][0]
+  const m01 = t[0][1]
+  const m10 = t[1][0]
+  const m11 = t[1][1]
+  // 两轴点积≈0 → 正交，无剪切
+  if (Math.abs(m00 * m01 + m10 * m11) < 1e-6) return null
+
+  const rotationRad = Math.atan2(-m10, m00)
+  const c = Math.cos(rotationRad)
+  const s = Math.sin(rotationRad)
+  // R^{-1} * M
+  const r00 = c * m00 - s * m10
+  const r01 = c * m01 - s * m11
+  const r10 = s * m00 + c * m10
+  const r11 = s * m01 + c * m11
+
+  const skewX = (Math.atan2(r01, r11) * 180) / Math.PI
+  const skewY = (Math.atan2(r10, r00) * 180) / Math.PI
+  if (Math.abs(skewX) < 0.01 && Math.abs(skewY) < 0.01) return null
+
+  return {
+    skewX: roundLayoutNum(skewX),
+    skewY: roundLayoutNum(skewY),
+    transform: [
+      [roundLayoutNum(m00), roundLayoutNum(m01)],
+      [roundLayoutNum(m10), roundLayoutNum(m11)],
+    ],
+  }
+}
+
+function hasMeaningfulSkew(node: SceneNode): boolean {
+  return extractLayoutSkew(node) != null
+}
+
 function hasMeaningfulRotation(node: SceneNode): boolean {
-  return 'rotation' in node && Math.abs(node.rotation) > 0.01
+  return (
+    ('rotation' in node && Math.abs(node.rotation) > 0.01) ||
+    hasMeaningfulSkew(node)
+  )
+}
+
+/** 烘焙后切图像素已含仿射变换，清除以免 HTML 再叠 */
+function clearLayoutAffine(layout: NodeInfo['layout']): void {
+  layout.rotation = undefined
+  layout.skewX = undefined
+  layout.skewY = undefined
+  layout.transform = undefined
 }
 
 function nodeHasVisibleImageFill(node: SceneNode): boolean {
@@ -393,22 +454,23 @@ function nodeHasVisibleImageFill(node: SceneNode): boolean {
 }
 
 /**
- * 带旋转的节点应整颗切图烘焙。
- * exportAsync 像素已含旋转；若仍保留 layout.rotation，HTML 再叠 CSS rotate
- * 会二次变换，且 Auto Layout 下原点与 Figma 不一致。
- * imageHash 是未旋转的源图，不能代替节点切图。
+ * 带旋转/剪切的节点应整颗切图烘焙。
+ * exportAsync 像素已含仿射变换；若仍保留 layout.rotation/skew，HTML 再叠
+ * CSS 会二次变换，且 Auto Layout 下原点与 Figma 不一致。
+ * imageHash 是未变换的源图，不能代替节点切图。
+ * 含文字时不烘焙，改用 CSS matrix/rotate（Skew 插件假斜体场景）。
  */
 function shouldBakeRotatedNode(node: SceneNode): boolean {
   if (!hasMeaningfulRotation(node)) return false
-  // 保留可编辑文案
+  // 保留可编辑文案（含 Skew 假斜体 → CSS matrix）
   if (subtreeHasText(node)) return false
-  // CSS 友好矩形/椭圆用 layout.rotation → CSS rotate，不整颗切图
+  // CSS 友好矩形/椭圆用 layout.rotation / transform → CSS，不整颗切图
   if (isCssFriendlyBoxShape(node)) return false
-  // 位图填充 + 旋转：必须烘焙
+  // 位图填充 + 旋转/剪切：必须烘焙
   if (nodeHasVisibleImageFill(node)) return true
-  // 无子层的旋转形状（矩形/椭圆等）
+  // 无子层的变换形状（矩形/椭圆等）
   if (!('children' in node) || node.children.length === 0) return true
-  // 有子层的旋转容器（如返回图标 Instance 翻转）：内部常再叠相对旋转与绝对坐标，
+  // 有子层的变换容器（如返回图标 Instance 翻转）：内部常再叠相对旋转与绝对坐标，
   // CSS 无法可靠还原，整颗切图。
   if (
     node.type === 'INSTANCE' ||
@@ -581,9 +643,24 @@ type NodeInfo = {
     parentY?: number
     rotation?: number
     /**
+     * 水平剪切角（度）。Skew 等插件改 relativeTransform 写入；
+     * 属性面板通常不显示。与 rotation 独立：纯 skew 时 rotation≈0。
+     */
+    skewX?: number
+    /**
+     * 垂直剪切角（度）。见 skewX。
+     */
+    skewY?: number
+    /**
+     * relativeTransform 的 2×2（[[m00,m01],[m10,m11]]）。
+     * 有 skew 时写出，供 HTML 用 CSS matrix(m00,m10,m01,m11) 精确还原
+     *（Figma 轴为单位向量，与 CSS skewX 的 tan 形式不完全等同）。
+     */
+    transform?: [[number, number], [number, number]]
+    /**
      * 视觉已烘焙（PNG/SVG）时，x/y/width/height 为相对父级的
-     * absoluteBoundingBox / absoluteRenderBounds，勿再叠 CSS rotate。
-     * 切图像素已含节点旋转。
+     * absoluteBoundingBox / absoluteRenderBounds，勿再叠 CSS rotate/skew。
+     * 切图像素已含节点旋转与剪切。
      */
     bakedVisual?: boolean
     constraints?: Constraints
@@ -771,6 +848,12 @@ function getLayoutInfo(node: SceneNode): NodeInfo['layout'] {
   }
 
   if ('rotation' in node) layout.rotation = node.rotation
+  const skew = extractLayoutSkew(node)
+  if (skew) {
+    layout.skewX = skew.skewX
+    layout.skewY = skew.skewY
+    layout.transform = skew.transform
+  }
   if ('constraints' in node) layout.constraints = node.constraints
 
   if ('layoutMode' in node && node.layoutMode !== 'NONE') {
@@ -874,7 +957,7 @@ function applyBakedVisualLayout(
     ('absoluteBoundingBox' in node && node.absoluteBoundingBox) ||
     ('absoluteRenderBounds' in node ? node.absoluteRenderBounds : null)
   if (!bounds) {
-    layout.rotation = undefined
+    clearLayoutAffine(layout)
     layout.bakedVisual = true
     return
   }
@@ -912,7 +995,7 @@ function applyBakedVisualLayout(
     layout.y = y
     layout.width = width
     layout.height = height
-    layout.rotation = undefined
+    clearLayoutAffine(layout)
     layout.bakedVisual = true
     return
   }
@@ -947,7 +1030,7 @@ function applyBakedVisualLayout(
         layout.y = y
         layout.width = width
         layout.height = height
-        layout.rotation = undefined
+        clearLayoutAffine(layout)
         layout.bakedVisual = true
         return
       }
@@ -964,7 +1047,7 @@ function applyBakedVisualLayout(
   layout.y = y
   layout.width = width
   layout.height = height
-  layout.rotation = undefined
+  clearLayoutAffine(layout)
   layout.bakedVisual = true
 }
 
@@ -1116,7 +1199,7 @@ async function getStylesInfo(node: SceneNode): Promise<NodeInfo['styles']> {
       fontName:
         textNode.fontName === figma.mixed
           ? undefined
-          : normalizeFontName(textNode.fontName),
+          : textNode.fontName,
       fontWeight:
         textNode.fontWeight === figma.mixed
           ? undefined
@@ -1168,7 +1251,7 @@ function serializeTextSegments(
       end: seg.end,
       fills: (seg.fills || []).map(serializePaint),
       fontSize: seg.fontSize,
-      fontName: normalizeFontName(seg.fontName),
+      fontName: seg.fontName,
       fontWeight: normalizeFontWeight(seg.fontWeight),
     }))
   } catch {
@@ -2061,25 +2144,6 @@ function applyImageRefCounts(
   }
 }
 
-/**
- * SF Pro Display / Text / Rounded 等光学尺寸变体统一为 SF Pro，
- * 避免 fonts 列表与 CSS font-family 出现多个等价族名。
- */
-function normalizeFontFamily(family: string): string {
-  const f = String(family || '').toLowerCase()
-  if (f.includes('sf pro')) return 'SF Pro'
-  return family
-}
-
-function normalizeFontName(
-  fontName: FontName | undefined,
-): FontName | undefined {
-  if (!fontName?.family) return fontName
-  const family = normalizeFontFamily(fontName.family)
-  if (family === fontName.family) return fontName
-  return {family, style: fontName.style}
-}
-
 /** 本机/系统字体：不走 CDN，由浏览器 font-family 回退栈解析 */
 function isSystemFontFamily(family: string): boolean {
   const f = family.toLowerCase()
@@ -2132,7 +2196,7 @@ function collectFontsUsed(nodes: NodeInfo[]): FontRef[] {
     fontWeight: number | undefined,
   ) => {
     if (!fontName?.family) return
-    const family = normalizeFontFamily(fontName.family)
+    const family = fontName.family
     const style = fontName.style || 'Regular'
     const key = `${family}::${style}`
     if (!map.has(key)) {

@@ -320,8 +320,47 @@
     if (stats.leafCount < VECTOR_BAKE_MIN_LEAVES) return false;
     return stats.vectorishCount / stats.leafCount >= VECTOR_BAKE_RATIO;
   }
+  function roundLayoutNum(n) {
+    return Math.round(n * 1e3) / 1e3;
+  }
+  function extractLayoutSkew(node) {
+    if (!("relativeTransform" in node)) return null;
+    const t = node.relativeTransform;
+    const m00 = t[0][0];
+    const m01 = t[0][1];
+    const m10 = t[1][0];
+    const m11 = t[1][1];
+    if (Math.abs(m00 * m01 + m10 * m11) < 1e-6) return null;
+    const rotationRad = Math.atan2(-m10, m00);
+    const c = Math.cos(rotationRad);
+    const s = Math.sin(rotationRad);
+    const r00 = c * m00 - s * m10;
+    const r01 = c * m01 - s * m11;
+    const r10 = s * m00 + c * m10;
+    const r11 = s * m01 + c * m11;
+    const skewX = Math.atan2(r01, r11) * 180 / Math.PI;
+    const skewY = Math.atan2(r10, r00) * 180 / Math.PI;
+    if (Math.abs(skewX) < 0.01 && Math.abs(skewY) < 0.01) return null;
+    return {
+      skewX: roundLayoutNum(skewX),
+      skewY: roundLayoutNum(skewY),
+      transform: [
+        [roundLayoutNum(m00), roundLayoutNum(m01)],
+        [roundLayoutNum(m10), roundLayoutNum(m11)]
+      ]
+    };
+  }
+  function hasMeaningfulSkew(node) {
+    return extractLayoutSkew(node) != null;
+  }
   function hasMeaningfulRotation(node) {
-    return "rotation" in node && Math.abs(node.rotation) > 0.01;
+    return "rotation" in node && Math.abs(node.rotation) > 0.01 || hasMeaningfulSkew(node);
+  }
+  function clearLayoutAffine(layout) {
+    layout.rotation = void 0;
+    layout.skewX = void 0;
+    layout.skewY = void 0;
+    layout.transform = void 0;
   }
   function nodeHasVisibleImageFill(node) {
     if (!("fills" in node) || node.fills === figma.mixed) return false;
@@ -482,6 +521,12 @@
       height: "height" in node ? node.height : 0
     };
     if ("rotation" in node) layout.rotation = node.rotation;
+    const skew = extractLayoutSkew(node);
+    if (skew) {
+      layout.skewX = skew.skewX;
+      layout.skewY = skew.skewY;
+      layout.transform = skew.transform;
+    }
     if ("constraints" in node) layout.constraints = node.constraints;
     if ("layoutMode" in node && node.layoutMode !== "NONE") {
       layout.layoutMode = node.layoutMode;
@@ -548,7 +593,7 @@
   function applyBakedVisualLayout(node, layout, exportDesignSize, visualBounds) {
     const bounds = "absoluteBoundingBox" in node && node.absoluteBoundingBox || ("absoluteRenderBounds" in node ? node.absoluteRenderBounds : null);
     if (!bounds) {
-      layout.rotation = void 0;
+      clearLayoutAffine(layout);
       layout.bakedVisual = true;
       return;
     }
@@ -580,7 +625,7 @@
       layout.y = y;
       layout.width = width;
       layout.height = height;
-      layout.rotation = void 0;
+      clearLayoutAffine(layout);
       layout.bakedVisual = true;
       return;
     }
@@ -599,7 +644,7 @@
           layout.y = y;
           layout.width = width;
           layout.height = height;
-          layout.rotation = void 0;
+          clearLayoutAffine(layout);
           layout.bakedVisual = true;
           return;
         }
@@ -613,7 +658,7 @@
     layout.y = y;
     layout.width = width;
     layout.height = height;
-    layout.rotation = void 0;
+    clearLayoutAffine(layout);
     layout.bakedVisual = true;
   }
   function shouldBakeEffectIntoPng(effect) {
@@ -719,7 +764,7 @@
       styles.text = {
         characters: textNode.characters,
         fontSize: textNode.fontSize === figma.mixed ? void 0 : textNode.fontSize,
-        fontName: textNode.fontName === figma.mixed ? void 0 : normalizeFontName(textNode.fontName),
+        fontName: textNode.fontName === figma.mixed ? void 0 : textNode.fontName,
         fontWeight: textNode.fontWeight === figma.mixed ? void 0 : normalizeFontWeight(textNode.fontWeight),
         textAlignHorizontal: textNode.textAlignHorizontal,
         textAlignVertical: textNode.textAlignVertical,
@@ -758,7 +803,7 @@
         end: seg.end,
         fills: (seg.fills || []).map(serializePaint),
         fontSize: seg.fontSize,
-        fontName: normalizeFontName(seg.fontName),
+        fontName: seg.fontName,
         fontWeight: normalizeFontWeight(seg.fontWeight)
       }));
     } catch (e) {
@@ -1393,17 +1438,6 @@
       if (!asset.source) asset.source = "fill";
     }
   }
-  function normalizeFontFamily(family) {
-    const f = String(family || "").toLowerCase();
-    if (f.includes("sf pro")) return "SF Pro";
-    return family;
-  }
-  function normalizeFontName(fontName) {
-    if (!(fontName == null ? void 0 : fontName.family)) return fontName;
-    const family = normalizeFontFamily(fontName.family);
-    if (family === fontName.family) return fontName;
-    return { family, style: fontName.style };
-  }
   function isSystemFontFamily(family) {
     const f = family.toLowerCase();
     return f.includes("sf pro") || f.includes("sf compact") || f.includes("sf mono") || f.includes("new york") || f.startsWith(".sf") || f.includes("pingfang") || f.includes("helvetica") || f.includes("apple color emoji") || f === "system-ui";
@@ -1433,7 +1467,7 @@
     const map = /* @__PURE__ */ new Map();
     const addFontRef = (fontName, fontWeight) => {
       if (!(fontName == null ? void 0 : fontName.family)) return;
-      const family = normalizeFontFamily(fontName.family);
+      const family = fontName.family;
       const style = fontName.style || "Regular";
       const key = `${family}::${style}`;
       if (!map.has(key)) {
