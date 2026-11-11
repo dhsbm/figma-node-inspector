@@ -7,6 +7,8 @@
   "editorType": ["figma", "dev"],
   "documentAccess": "dynamic-page",
   "networkAccess": {
-    "allowedDomains": ["none"]
+    "allowedDomains": ["none"],
+    "devAllowedDomains": ["http://localhost:3999"],
+    "reasoning": "可选的本地 Agent 桥接：插件在开发模式下从本机 MCP hub 领取图层操作任务。默认关闭，需在面板手动开启；只访问本机回环地址，不访问任何外部网络。"
   }
 }

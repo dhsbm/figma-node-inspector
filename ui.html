@@ -1245,6 +1245,52 @@
       .resize-handle:active {
         opacity: 0.9;
       }
+
+      /* Agent 桥接：一个状态点 + 一个开关，不抢主界面视觉 */
+      .ni-bridge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 6px 2px 8px;
+        border: 1px solid var(--figma-color-border, rgba(0, 0, 0, 0.1));
+        border-radius: 6px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      .ni-bridge-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--figma-color-text-tertiary, #999);
+      }
+      .ni-bridge-dot[data-state='idle'] {
+        background: var(--figma-color-bg-success, #14ae5c);
+      }
+      .ni-bridge-dot[data-state='busy'] {
+        background: var(--figma-color-bg-brand, #0d99ff);
+      }
+      .ni-bridge-dot[data-state='connecting'] {
+        background: var(--figma-color-bg-warning, #f5a623);
+      }
+      .ni-bridge-dot[data-state='error'] {
+        background: var(--figma-color-bg-danger, #f24822);
+      }
+      .ni-bridge-text {
+        color: var(--figma-color-text-secondary, #666);
+      }
+      .ni-bridge-toggle {
+        padding: 1px 6px;
+        border: 1px solid var(--figma-color-border, rgba(0, 0, 0, 0.1));
+        border-radius: 4px;
+        background: transparent;
+        color: var(--figma-color-text, #333);
+        font: inherit;
+        cursor: pointer;
+      }
+      .ni-bridge-toggle[aria-pressed='true'] {
+        border-color: var(--figma-color-border-brand, #0d99ff);
+        color: var(--figma-color-text-brand, #0d99ff);
+      }
     </style>
   </head>
   <body>
@@ -1254,6 +1300,7 @@
         <div class="meta" id="meta">等待选择节点…</div>
       </div>
       <div class="actions">
+        <div class="ni-bridge" id="ni-bridge-root"></div>
         <select
           id="header-export-kind"
           class="header-export-kind"
@@ -5278,5 +5325,18 @@ ZIP \u5BFC\u51FA\u65F6\uFF0C\u8282\u70B9\u5185\u8054 \`svg\` \u4F1A\u6309\u5185\
         })
       })()
     </script>
+
+    <!-- bridge-bundle:start -->
+<script>
+"use strict";(()=>{var k=Object.defineProperty,L=Object.defineProperties;var _=Object.getOwnPropertyDescriptors;var y=Object.getOwnPropertySymbols;var P=Object.prototype.hasOwnProperty,E=Object.prototype.propertyIsEnumerable;var M=(t,e,n)=>e in t?k(t,e,{enumerable:!0,configurable:!0,writable:!0,value:n}):t[e]=n,c=(t,e)=>{for(var n in e||(e={}))P.call(e,n)&&M(t,n,e[n]);if(y)for(var n of y(e))E.call(e,n)&&M(t,n,e[n]);return t},m=(t,e)=>L(t,_(e));var h="http://localhost:3999";var f=t=>new Promise(e=>setTimeout(e,t)),w=t=>{let e=!1,n=!1,i=!1,u=0,a=null,r=0,o=null,d={state:"off",detail:"\u672A\u542F\u7528",calls:0,lastOp:null},g=s=>{d=m(c(c({},d),s),{calls:u,lastOp:a}),t.onChange(d)},p=async(s,l)=>await fetch(h+s,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(l)}),b=async s=>{var l;o&&(clearTimeout(o),o=null),i=!1,g({state:e?"idle":"off",detail:s.ok?`${(l=d.lastOp)!=null?l:""} \u5B8C\u6210`:String(s.error)}),await p("/result",s).catch(()=>{})},O=s=>{i=!0,u+=1,a=s.op,g({state:"busy",detail:s.op}),t.post({type:"bridge-job",job:s}),o=setTimeout(()=>{b({id:s.id,ok:!1,error:"\u4E3B\u7EBF\u7A0B 60000ms \u672A\u54CD\u5E94"})},6e4)},T=async()=>{if(!n){for(n=!0;e;){if(i||t.shouldPause()){await f(250);continue}if(r>0&&(await f(Math.min(3e4,1e3*2**Math.min(r,5))),!e))break;try{let s=await fetch(`${h}/next?wait=20000`);if(!e)break;if(r=0,s.status===204){g({state:"idle",detail:"\u5DF2\u8FDE\u63A5 \xB7 \u7A7A\u95F2"});continue}if(!s.ok)throw new Error(`hub ${s.status}`);let l=await s.json();if(!e){await p("/result",{id:l.id,ok:!1,error:"\u63D2\u4EF6\u5DF2\u5173\u95ED\u6865\u63A5"}).catch(()=>{});break}O(l)}catch(s){r+=1;let l=s instanceof Error?s.message:String(s);g({state:"error",detail:`\u672A\u8FDE\u63A5 hub\uFF08${l}\uFF09`}),await f(Math.min(3e4,1e3*2**Math.min(r,5)))}}n=!1}};return{get status(){return d},get enabled(){return e},handleResult:s=>{b(s)},start:()=>{e||(e=!0,r=0,g({state:"connecting",detail:"\u8FDE\u63A5\u4E2D\u2026"}),T())},stop:()=>{e&&(e=!1,o&&(clearTimeout(o),o=null),i=!1,g({state:"off",detail:"\u5DF2\u5173\u95ED"}))},toggle:()=>e?{enabled:!1}:{enabled:!0}}};var x={off:"\u5173\u95ED",connecting:"\u8FDE\u63A5\u4E2D",idle:"\u5DF2\u8FDE\u63A5",busy:"\u6267\u884C\u4E2D",error:"\u672A\u8FDE\u63A5"},S=({root:t,onToggle:e})=>{let n=!1;t.innerHTML=`
+    <span class="ni-bridge-dot" data-state="off"></span>
+    <span class="ni-bridge-text">Agent</span>
+    <button type="button" class="ni-bridge-toggle" aria-pressed="false">
+      \u5F00\u542F
+    </button>
+  `;let i=t.querySelector(".ni-bridge-dot"),u=t.querySelector(".ni-bridge-text"),a=t.querySelector(".ni-bridge-toggle");a.addEventListener("click",()=>{n=!n,a.textContent=n?"\u5173\u95ED":"\u5F00\u542F",a.setAttribute("aria-pressed",String(n)),e(n)});let r=o=>{i.dataset.state=o.state;let d=o.calls>0?` \xB7 ${o.calls}`:"";u.textContent=`Agent ${x[o.state]}${d}`,u.title=o.detail};return r({state:"off",detail:"\u672A\u542F\u7528",calls:0,lastOp:null}),{render:r}};var B=()=>{let t=document.getElementById("ni-bridge-root");if(!t)return;let e=window.onmessage,n=!1,i=w({post:a=>{parent.postMessage({pluginMessage:a},"*")},onChange:a=>u.render(a),shouldPause:()=>n}),u=S({root:t,onToggle:a=>{a?i.start():i.stop()}});window.onmessage=function(a){let r=a.data&&a.data.pluginMessage;if(typeof e=="function")try{e.call(window,a)}catch(o){console.error("\u539F\u6709\u6D88\u606F\u5904\u7406\u5931\u8D25",o)}if(r){if(r.type==="bridge-result"){i.handleResult(r.payload);return}if(r.type==="bridge-busy"){n=!!r.busy;return}r.type==="bridge-document-changed"&&parent.postMessage({pluginMessage:{type:"inspect"}},"*")}},parent.postMessage({pluginMessage:{type:"bridge-hello"}},"*")};document.readyState==="loading"?document.addEventListener("DOMContentLoaded",B):B();})();
+
+</script>
+<!-- bridge-bundle:end -->
   </body>
 </html>

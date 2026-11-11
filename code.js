@@ -170,6 +170,552 @@
     return root;
   }
 
+  // src/bridge/layer-order.mjs
+  var planMove = (currentIds, nodeId, index) => {
+    const rest = currentIds.filter((id) => id !== nodeId);
+    const target = Math.max(0, Math.min(index, rest.length));
+    const desired = [...rest];
+    desired.splice(target, 0, nodeId);
+    return { desired, target };
+  };
+  var planReorder = (currentIds, desiredIds) => {
+    const ops = [];
+    const working = [...currentIds];
+    for (let i = 0; i < desiredIds.length; i += 1) {
+      if (working[i] === desiredIds[i]) continue;
+      const from = working.indexOf(desiredIds[i]);
+      if (from >= 0) working.splice(from, 1);
+      working.splice(i, 0, desiredIds[i]);
+      ops.push({ index: i, id: desiredIds[i] });
+    }
+    return ops;
+  };
+
+  // src/bridge/ops.ts
+  var fail = (message) => {
+    throw new Error(message);
+  };
+  var num = (args, key) => {
+    const raw = args[key];
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : void 0;
+  };
+  var str = (args, key) => {
+    const raw = args[key];
+    return typeof raw === "string" && raw ? raw : void 0;
+  };
+  var getNode = async (id) => {
+    if (!id) return fail("\u7F3A\u5C11 nodeId");
+    const node = await figma.getNodeByIdAsync(id);
+    if (!node) return fail(`\u8282\u70B9\u4E0D\u5B58\u5728: ${id}`);
+    return node;
+  };
+  var hasChildren = (node) => "children" in node && Array.isArray(node.children);
+  var ensurePageLoaded = async (page) => {
+    if (page.type !== "PAGE" || page === figma.currentPage) return;
+    const pageNode = page;
+    if (typeof pageNode.loadAsync === "function") await pageNode.loadAsync();
+    else await figma.loadAllPagesAsync();
+  };
+  var clampIndex = (parent, index) => Math.max(0, Math.min(index, parent.children.length));
+  var appendTo = (parent, node) => {
+    if (!parent || !("children" in parent)) return;
+    const container = parent;
+    container.insertChild(clampIndex(container, container.children.length), node);
+  };
+  var moveTo = (parent, nodeId, index) => {
+    const currentIds = parent.children.map((c) => c.id);
+    const { desired } = planMove(currentIds, nodeId, index);
+    for (const step of planReorder(currentIds, desired)) {
+      const moving = parent.children.find((c) => c.id === step.id);
+      if (moving) parent.insertChild(step.index, moving);
+    }
+    return parent.children.findIndex((c) => c.id === nodeId);
+  };
+  var toRgb = (hex) => {
+    const raw = hex.replace("#", "").trim();
+    const full = raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw;
+    if (!/^[0-9a-fA-F]{6}$/.test(full)) return fail(`\u65E0\u6CD5\u89E3\u6790\u989C\u8272: ${hex}`);
+    return {
+      r: parseInt(full.slice(0, 2), 16) / 255,
+      g: parseInt(full.slice(2, 4), 16) / 255,
+      b: parseInt(full.slice(4, 6), 16) / 255
+    };
+  };
+  var toPaints = (value) => {
+    if (value === void 0 || value === null) return void 0;
+    const list = Array.isArray(value) ? value : [value];
+    return list.map((item) => {
+      if (typeof item === "string") return { type: "SOLID", color: toRgb(item) };
+      return item;
+    });
+  };
+  var summarize = (node) => {
+    const box = node.absoluteBoundingBox;
+    return {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
+      childCount: hasChildren(node) ? node.children.length : 0
+    };
+  };
+  var tree = (node, depth) => {
+    const item = {
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      box: summarize(node).box
+    };
+    if (depth > 0 && hasChildren(node)) {
+      item.children = node.children.map((c) => tree(c, depth - 1));
+    }
+    return item;
+  };
+  var detail = (node) => {
+    const base = __spreadProps(__spreadValues({}, summarize(node)), {
+      parentId: node.parent ? node.parent.id : null
+    });
+    if ("visible" in node) base.visible = node.visible;
+    if ("locked" in node) base.locked = node.locked;
+    if ("opacity" in node) base.opacity = node.opacity;
+    if ("blendMode" in node) base.blendMode = node.blendMode;
+    if ("fills" in node) base.fills = node.fills;
+    if ("strokes" in node) base.strokes = node.strokes;
+    if ("cornerRadius" in node) {
+      const radius = node.cornerRadius;
+      base.cornerRadius = radius;
+    }
+    if ("layoutMode" in node) {
+      const frame = node;
+      base.autoLayout = {
+        layoutMode: frame.layoutMode,
+        itemSpacing: frame.itemSpacing,
+        padding: {
+          top: frame.paddingTop,
+          right: frame.paddingRight,
+          bottom: frame.paddingBottom,
+          left: frame.paddingLeft
+        },
+        primaryAxisAlignItems: frame.primaryAxisAlignItems,
+        counterAxisAlignItems: frame.counterAxisAlignItems
+      };
+    }
+    if (node.type === "TEXT") {
+      const text = node;
+      base.text = {
+        characters: text.characters,
+        fontSize: text.fontSize,
+        fontName: text.fontName
+      };
+    }
+    return base;
+  };
+  var createOps = () => {
+    const ops = {
+      async getFileInfo() {
+        return {
+          fileName: figma.root.name,
+          fileKey: figma.fileKey || null,
+          currentPage: { id: figma.currentPage.id, name: figma.currentPage.name },
+          pages: figma.root.children.map((p) => ({ id: p.id, name: p.name }))
+        };
+      },
+      async getSelection() {
+        const nodes = figma.currentPage.selection;
+        return { count: nodes.length, nodes: nodes.map(summarize) };
+      },
+      async getPageTree(args) {
+        var _a;
+        const pageId = str(args, "pageId");
+        const page = pageId ? await getNode(pageId) : figma.currentPage;
+        await ensurePageLoaded(page);
+        if (!hasChildren(page)) {
+          return fail(`${page.type} \u6CA1\u6709\u5B50\u8282\u70B9`);
+        }
+        const depth = (_a = num(args, "depth")) != null ? _a : 1;
+        return {
+          page: { id: page.id, name: page.name },
+          children: page.children.map(
+            (c) => tree(c, Math.max(0, depth))
+          )
+        };
+      },
+      async getNode(args) {
+        var _a;
+        const node = await getNode(str(args, "nodeId"));
+        const depth = (_a = num(args, "depth")) != null ? _a : 2;
+        return __spreadProps(__spreadValues({}, detail(node)), {
+          children: hasChildren(node) ? node.children.map((c) => tree(c, Math.max(0, depth - 1))) : []
+        });
+      },
+      async groupNodes(args) {
+        const ids = args.nodeIds || [];
+        if (ids.length === 0) return fail("nodeIds \u4E0D\u80FD\u4E3A\u7A7A");
+        const nodes = await Promise.all(ids.map((id) => getNode(id)));
+        const parent = nodes[0].parent;
+        if (!parent) return fail("\u8282\u70B9\u6CA1\u6709\u7236\u7EA7\uFF0C\u65E0\u6CD5\u5206\u7EC4");
+        const wrong = nodes.find((n) => n.parent !== parent);
+        if (wrong) {
+          return fail(`\u8282\u70B9 ${wrong.id} \u4E0E ${nodes[0].id} \u4E0D\u5728\u540C\u4E00\u7236\u7EA7`);
+        }
+        const parentIds = parent.children.map((c) => c.id);
+        const originalIndex = Math.min(
+          ...ids.map((id) => {
+            const at = parentIds.indexOf(id);
+            return at < 0 ? parentIds.length : at;
+          })
+        );
+        const group = figma.group(
+          nodes,
+          parent,
+          Math.max(0, originalIndex)
+        );
+        const name = str(args, "name");
+        if (name) group.name = name;
+        const wanted = num(args, "index");
+        const placed = wanted === void 0 ? originalIndex : moveTo(parent, group.id, wanted);
+        return { id: group.id, name: group.name, index: placed };
+      },
+      async ungroup(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const ungroupable = node;
+        if (typeof ungroupable.ungroup !== "function") {
+          return fail(`${node.type} \u4E0D\u652F\u6301\u89E3\u7EC4`);
+        }
+        const released = ungroupable.ungroup();
+        return { releasedIds: released.map((n) => n.id) };
+      },
+      async reorderNodes(args) {
+        var _a;
+        const position = str(args, "position");
+        const nodeId = str(args, "nodeId");
+        if (position) {
+          const node = await getNode(
+            nodeId || (args.nodeIds || [])[0]
+          );
+          const parent2 = node.parent;
+          if (!parent2) return fail("\u6839\u8282\u70B9\u65E0\u6CD5\u8C03\u6574\u5C42\u7EA7");
+          const ids2 = parent2.children.map((c) => c.id);
+          const current = ids2.indexOf(node.id);
+          const last = ids2.length - 1;
+          const targets = {
+            front: last,
+            back: 0,
+            forward: Math.min(current + 1, last),
+            backward: Math.max(current - 1, 0)
+          };
+          const target = targets[position];
+          if (target === void 0) return fail(`\u672A\u77E5 position: ${position}`);
+          const placed = moveTo(parent2, node.id, target);
+          return { id: node.id, from: current, index: placed, total: ids2.length };
+        }
+        const ids = args.nodeIds || [];
+        if (ids.length === 0) {
+          return fail("\u9700\u8981 nodeIds+index\uFF0C\u6216 nodeId+position");
+        }
+        const nodes = await Promise.all(ids.map((id) => getNode(id)));
+        const parentId = str(args, "parentId");
+        const parent = parentId ? await getNode(parentId) : nodes[0].parent;
+        if (!parent || !("children" in parent)) {
+          return fail("\u65E0\u6CD5\u786E\u5B9A\u76EE\u6807\u7236\u7EA7");
+        }
+        const container = parent;
+        const base = (_a = num(args, "index")) != null ? _a : container.children.length;
+        const currentIds = container.children.map((c) => c.id);
+        const desired = currentIds.filter((id) => !ids.includes(id));
+        desired.splice(Math.min(base, desired.length), 0, ...ids);
+        for (const step of planReorder(currentIds, desired)) {
+          const moving = container.children.find((c) => c.id === step.id);
+          if (moving) container.insertChild(step.index, moving);
+        }
+        return {
+          parentId: parent.id,
+          insertedFrom: base,
+          order: container.children.slice(base, base + ids.length).map((n) => n.id)
+        };
+      },
+      async renameNode(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const name = str(args, "name");
+        if (!name) return fail("\u7F3A\u5C11 name");
+        node.name = name;
+        return { id: node.id, name: node.name };
+      },
+      async moveNode(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const parentId = str(args, "parentId");
+        if (parentId) {
+          const parent = await getNode(parentId);
+          if (!("children" in parent)) return fail("\u76EE\u6807\u4E0D\u662F\u5BB9\u5668\u8282\u70B9");
+          const container = parent;
+          const index = clampIndex(container, container.children.length);
+          container.insertChild(index, node);
+        }
+        const x = num(args, "x");
+        const y = num(args, "y");
+        if (x !== void 0 && "x" in node) node.x = x;
+        if (y !== void 0 && "y" in node) node.y = y;
+        return detail(node);
+      },
+      async createFrame(args) {
+        var _a, _b;
+        const frame = figma.createFrame();
+        const name = str(args, "name");
+        if (name) frame.name = name;
+        frame.resize((_a = num(args, "width")) != null ? _a : 100, (_b = num(args, "height")) != null ? _b : 100);
+        const parentId = str(args, "parentId");
+        const parent = parentId ? await getNode(parentId) : figma.currentPage;
+        appendTo(parent, frame);
+        const x = num(args, "x");
+        const y = num(args, "y");
+        if (x !== void 0) frame.x = x;
+        if (y !== void 0) frame.y = y;
+        const fill = args.fill;
+        if (fill !== void 0) {
+          const paints = toPaints(fill);
+          if (paints) frame.fills = paints;
+        }
+        const layoutMode = str(args, "layoutMode");
+        if (layoutMode === "HORIZONTAL" || layoutMode === "VERTICAL") {
+          frame.layoutMode = layoutMode;
+        }
+        return summarize(frame);
+      },
+      async createRectangle(args) {
+        var _a, _b;
+        const rect = figma.createRectangle();
+        const name = str(args, "name");
+        if (name) rect.name = name;
+        rect.resize((_a = num(args, "width")) != null ? _a : 100, (_b = num(args, "height")) != null ? _b : 100);
+        const parentId = str(args, "parentId");
+        const parent = parentId ? await getNode(parentId) : figma.currentPage;
+        appendTo(parent, rect);
+        const x = num(args, "x");
+        const y = num(args, "y");
+        if (x !== void 0) rect.x = x;
+        if (y !== void 0) rect.y = y;
+        const fill = args.fill;
+        if (fill !== void 0) {
+          const paints = toPaints(fill);
+          if (paints) rect.fills = paints;
+        }
+        const cornerRadius = num(args, "cornerRadius");
+        if (cornerRadius !== void 0) rect.cornerRadius = cornerRadius;
+        return summarize(rect);
+      },
+      async createText(args) {
+        var _a, _b, _c;
+        const text = str(args, "text");
+        if (!text) return fail("\u7F3A\u5C11 text");
+        const family = (_a = str(args, "fontFamily")) != null ? _a : "Inter";
+        const style = (_b = str(args, "fontStyle")) != null ? _b : "Regular";
+        const fontName = { family, style };
+        await figma.loadFontAsync(fontName);
+        const node = figma.createText();
+        node.fontName = fontName;
+        node.fontSize = (_c = num(args, "fontSize")) != null ? _c : 14;
+        node.characters = text;
+        const parentId = str(args, "parentId");
+        const parent = parentId ? await getNode(parentId) : figma.currentPage;
+        appendTo(parent, node);
+        const x = num(args, "x");
+        const y = num(args, "y");
+        if (x !== void 0) node.x = x;
+        if (y !== void 0) node.y = y;
+        const fill = args.fill;
+        if (fill !== void 0) {
+          const paints = toPaints(fill);
+          if (paints) node.fills = paints;
+        }
+        return summarize(node);
+      },
+      async cloneNode(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const clone = node.clone();
+        const parentId = str(args, "parentId");
+        if (parentId) {
+          const parent = await getNode(parentId);
+          if (!("children" in parent)) return fail("\u76EE\u6807\u4E0D\u662F\u5BB9\u5668\u8282\u70B9");
+          appendTo(parent, clone);
+        }
+        const x = num(args, "x");
+        const y = num(args, "y");
+        if (x !== void 0) clone.x = x;
+        if (y !== void 0) clone.y = y;
+        return summarize(clone);
+      },
+      async setStyle(args) {
+        const node = await getNode(str(args, "nodeId"));
+        if (args.fills !== void 0) {
+          if (!("fills" in node)) return fail(`${node.type} \u4E0D\u652F\u6301 fills`);
+          const paints = toPaints(args.fills);
+          if (paints) node.fills = paints;
+        }
+        if (args.strokes !== void 0) {
+          if (!("strokes" in node)) return fail(`${node.type} \u4E0D\u652F\u6301 strokes`);
+          const paints = toPaints(args.strokes);
+          if (paints) node.strokes = paints;
+        }
+        const strokeWeight = num(args, "strokeWeight");
+        if (strokeWeight !== void 0 && "strokeWeight" in node) {
+          ;
+          node.strokeWeight = strokeWeight;
+        }
+        const cornerRadius = num(args, "cornerRadius");
+        if (cornerRadius !== void 0 && "cornerRadius" in node) {
+          ;
+          node.cornerRadius = cornerRadius;
+        }
+        const opacity = num(args, "opacity");
+        if (opacity !== void 0 && "opacity" in node) {
+          node.opacity = Math.min(1, Math.max(0, opacity));
+        }
+        const blendMode = str(args, "blendMode");
+        if (blendMode && "blendMode" in node) {
+          ;
+          node.blendMode = blendMode;
+        }
+        if (Array.isArray(args.effects) && "effects" in node) {
+          ;
+          node.effects = args.effects;
+        }
+        return detail(node);
+      },
+      async setLayout(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const width = num(args, "width");
+        const height = num(args, "height");
+        if (width !== void 0 && height !== void 0 && "resize" in node) {
+          node.resize(width, height);
+        }
+        const layoutMode = str(args, "layoutMode");
+        if (layoutMode && "layoutMode" in node) {
+          const frame = node;
+          if (layoutMode === "NONE" || layoutMode === "HORIZONTAL" || layoutMode === "VERTICAL") {
+            frame.layoutMode = layoutMode;
+          }
+        }
+        const padding = num(args, "padding");
+        if (padding !== void 0 && "paddingTop" in node) {
+          const frame = node;
+          frame.paddingTop = padding;
+          frame.paddingRight = padding;
+          frame.paddingBottom = padding;
+          frame.paddingLeft = padding;
+        }
+        const itemSpacing = num(args, "itemSpacing");
+        if (itemSpacing !== void 0 && "itemSpacing" in node) {
+          ;
+          node.itemSpacing = itemSpacing;
+        }
+        const primary = str(args, "primaryAxisAlignItems");
+        if (primary && "primaryAxisAlignItems" in node) {
+          ;
+          node.primaryAxisAlignItems = primary;
+        }
+        const counter = str(args, "counterAxisAlignItems");
+        if (counter && "counterAxisAlignItems" in node) {
+          ;
+          node.counterAxisAlignItems = counter;
+        }
+        const x = num(args, "x");
+        const y = num(args, "y");
+        if (x !== void 0 && "x" in node) node.x = x;
+        if (y !== void 0 && "y" in node) node.y = y;
+        const rotation = num(args, "rotation");
+        if (rotation !== void 0 && "rotation" in node) {
+          ;
+          node.rotation = rotation;
+        }
+        return detail(node);
+      },
+      async setVisible(args) {
+        const node = await getNode(str(args, "nodeId"));
+        node.visible = Boolean(args.visible);
+        return { id: node.id, visible: node.visible };
+      },
+      async setLocked(args) {
+        const node = await getNode(str(args, "nodeId"));
+        node.locked = Boolean(args.locked);
+        return { id: node.id, locked: node.locked };
+      },
+      async setText(args) {
+        const node = await getNode(str(args, "nodeId"));
+        if (node.type !== "TEXT") return fail(`${node.type} \u4E0D\u662F\u6587\u672C\u8282\u70B9`);
+        const text = str(args, "text");
+        if (text === void 0) return fail("\u7F3A\u5C11 text");
+        const textNode = node;
+        await figma.loadFontAsync(textNode.fontName);
+        textNode.characters = text;
+        return { id: node.id, characters: textNode.characters };
+      },
+      async deleteNode(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const removed = summarize(node);
+        node.remove();
+        return { removed };
+      }
+    };
+    return ops;
+  };
+
+  // src/bridge/queue.mjs
+  var createSerialQueue = () => {
+    let tail = Promise.resolve();
+    let depth = 0;
+    const run = (task) => {
+      depth += 1;
+      const start = tail.then(task, task);
+      tail = start.then(
+        () => {
+          depth -= 1;
+        },
+        () => {
+          depth -= 1;
+        }
+      );
+      return start;
+    };
+    return { run, get depth() {
+      return depth;
+    } };
+  };
+
+  // src/bridge/index.ts
+  var READ_ONLY_OPS = /* @__PURE__ */ new Set([
+    "getFileInfo",
+    "getSelection",
+    "getPageTree",
+    "getNode"
+  ]);
+  var createBridge = (hooks = {}) => {
+    const ops = createOps();
+    const queue = createSerialQueue();
+    const run = async (job) => {
+      var _a, _b, _c;
+      const handler = ops[job.op];
+      if (!handler) {
+        return { id: job.id, ok: false, error: `\u672A\u77E5 op: ${job.op}` };
+      }
+      const mutating = !READ_ONLY_OPS.has(job.op);
+      if (mutating) (_a = hooks.onBusyChange) == null ? void 0 : _a.call(hooks, true);
+      try {
+        const result = await handler(job.args || {});
+        if (mutating) (_b = hooks.onDocumentChanged) == null ? void 0 : _b.call(hooks);
+        return { id: job.id, ok: true, result: result != null ? result : null };
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        return { id: job.id, ok: false, error };
+      } finally {
+        if (mutating) (_c = hooks.onBusyChange) == null ? void 0 : _c.call(hooks, false);
+      }
+    };
+    const enqueue = (job, onResult) => {
+      void queue.run(() => run(job)).then(onResult);
+    };
+    return { enqueue, depth: () => queue.depth, opNames: Object.keys(ops) };
+  };
+
   // code.ts
   var MIN_FONT_WEIGHT = 400;
   function normalizeFontWeight(weight) {
@@ -2188,7 +2734,29 @@
     rootLocked = saved === true;
     postRootLockState();
   });
+  var bridge = createBridge({
+    onDocumentChanged: () => {
+      figma.ui.postMessage({ type: "bridge-document-changed" });
+    },
+    onBusyChange: (busy) => {
+      figma.ui.postMessage({ type: "bridge-busy", busy });
+    }
+  });
   figma.ui.onmessage = async (msg) => {
+    if (msg.type === "bridge-hello") {
+      figma.ui.postMessage({
+        type: "bridge-ready",
+        fileName: figma.root.name,
+        fileKey: figma.fileKey || null
+      });
+      return;
+    }
+    if (msg.type === "bridge-job") {
+      bridge.enqueue(msg.job, (payload) => {
+        figma.ui.postMessage({ type: "bridge-result", payload });
+      });
+      return;
+    }
     if (msg.type === "resize") {
       const size = clampUiSize(msg.width, msg.height);
       figma.ui.resize(size.width, size.height);

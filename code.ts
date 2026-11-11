@@ -16,6 +16,7 @@ import {
 
 import {resolveAutoLineHeightPx} from './scripts/lib/figma-line-height.mjs'
 import {attachRootRelativeCoords} from './scripts/lib/root-relative-layout.mjs'
+import {createBridge} from './src/bridge/index'
 
 /** PingFang Regular 等在 Figma 常报 300；JSON/CSS 统一下限 400 */
 const MIN_FONT_WEIGHT = 400
@@ -3207,8 +3208,40 @@ type UiMessage =
       nodeIds: string[]
       scale?: number
     }
+  | {type: 'bridge-job'; job: {id: string; op: string; args?: Record<string, unknown>}}
+  | {type: 'bridge-hello'}
+
+/**
+ * 桥接：让 agent 通过本地 hub 读写图层。
+ * 默认关闭，从面板「Agent」开关打开后才接受任务。
+ * 开关状态仅存内存，每次打开插件都要重新开启（刻意不做持久化，
+ * 避免插件静默联网）。
+ */
+const bridge = createBridge({
+  onDocumentChanged: () => {
+    // agent 改了文档，Inspector 的树已过期；下次 request 会重读
+    figma.ui.postMessage({type: 'bridge-document-changed'})
+  },
+  onBusyChange: (busy) => {
+    figma.ui.postMessage({type: 'bridge-busy', busy})
+  },
+})
 
 figma.ui.onmessage = async (msg: UiMessage) => {
+  if (msg.type === 'bridge-hello') {
+    figma.ui.postMessage({
+      type: 'bridge-ready',
+      fileName: figma.root.name,
+      fileKey: figma.fileKey || null,
+    })
+    return
+  }
+  if (msg.type === 'bridge-job') {
+    bridge.enqueue(msg.job, (payload) => {
+      figma.ui.postMessage({type: 'bridge-result', payload})
+    })
+    return
+  }
   if (msg.type === 'resize') {
     const size = clampUiSize(msg.width, msg.height)
     figma.ui.resize(size.width, size.height)

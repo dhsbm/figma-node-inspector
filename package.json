@@ -25,7 +25,12 @@
     "build:ui": "node scripts/build-ui.mjs",
     "pack": "npm run build && node scripts/pack-plugin.mjs",
     "generate:html": "node scripts/generate-html.mjs",
-    "docs:json-schema": "node -e \"import {getNodeJsonSchemaDoc,getNodeJsonSchemaDocFilename} from './scripts/lib/node-json-schema-doc.mjs'; import fs from 'fs'; fs.mkdirSync('docs',{recursive:true}); const f='docs/'+getNodeJsonSchemaDocFilename('node-json'); fs.writeFileSync(f, getNodeJsonSchemaDoc()); console.log('wrote', f)\""
+    "docs:json-schema": "node -e \"import {getNodeJsonSchemaDoc,getNodeJsonSchemaDocFilename} from './scripts/lib/node-json-schema-doc.mjs'; import fs from 'fs'; fs.mkdirSync('docs',{recursive:true}); const f='docs/'+getNodeJsonSchemaDocFilename('node-json'); fs.writeFileSync(f, getNodeJsonSchemaDoc()); console.log('wrote', f)\"",
+    "typecheck": "tsc --noEmit",
+    "test:bridge": "node scripts/test-bridge.mjs && node scripts/test-ui.mjs",
+    "test:mcp": "node scripts/test-mcp-check.mjs && node scripts/test-mcp-protocol.mjs && node scripts/test-mcp-e2e.mjs && node scripts/test-mcp-stdio.mjs",
+    "test": "npm run test:bridge && npm run test:mcp",
+    "mcp": "node src/mcp/mcp.mjs"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.109.0",

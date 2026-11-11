@@ -99,6 +99,28 @@ Figma 选区
   → ui.html 树浏览 / 预览 / 导出
        └─ JSON / HTML / ZIP / 图片（浏览器下载）
             └─ 可选 CLI：generate:html
+
+可选：Agent 桥接
+  agent ──MCP(stdio)──▶ src/mcp/mcp.mjs ──HTTP:3999──▶ 插件面板「Agent」开关
+                                                      → code.ts 改图层
+```
+
+同一个仓库既是插件，也带一个本地 MCP server。桥接默认关闭，
+面板开关打开后才联网，所以导出流程不受影响。
+
+```
+├── code.ts / ui.html / manifest.json   插件运行时
+├── src/bridge/                         插件侧桥接（ops / 轮询 / 面板）
+├── src/mcp/                            本机 MCP server
+├── scripts/                            构建、打包、测试
+└── docs/                               字段说明与资源
+```
+
+```bash
+npm run build       # code.js + 两个 UI bundle
+npm run pack        # release/ 可分发插件
+npm run mcp         # 起 MCP server（hub:3999）
+npm test            # test:bridge + test:mcp
 ```
 
 ---
