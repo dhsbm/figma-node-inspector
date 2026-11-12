@@ -191,6 +191,428 @@
     return ops;
   };
 
+  // src/shared/paint.ts
+  var toByte = (v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0");
+  var rgbaToHex = (color, opacity = 1) => {
+    const a = "a" in color ? color.a * opacity : opacity;
+    const rgb = `#${toByte(color.r)}${toByte(color.g)}${toByte(color.b)}`;
+    if (a >= 1) return rgb.toUpperCase();
+    return `${rgb}${toByte(a)}`.toUpperCase();
+  };
+  var gradientCssAngle = (t) => {
+    const radians = Math.atan2(t[1][0], t[0][0]);
+    const deg = radians * 180 / Math.PI + 90;
+    return Math.round((deg % 360 + 360) % 360);
+  };
+  var gradientCssValue = (paint) => {
+    if (paint.type !== "GRADIENT_LINEAR") return void 0;
+    const angle = gradientCssAngle(paint.gradientTransform);
+    const stops = paint.gradientStops.map(
+      (s) => `${rgbaToHex(s.color)} ${(s.position * 100).toFixed(2)}%`
+    );
+    return `linear-gradient(${angle}deg, ${stops.join(", ")})`;
+  };
+  var isGradient = (paint) => paint.type.startsWith("GRADIENT_");
+  var serializePaint = (paint) => {
+    var _a, _b, _c, _d, _e, _f;
+    if (paint.type === "SOLID") {
+      return {
+        type: "SOLID",
+        color: rgbaToHex(paint.color, (_a = paint.opacity) != null ? _a : 1),
+        opacity: (_b = paint.opacity) != null ? _b : 1,
+        visible: paint.visible !== false,
+        blendMode: paint.blendMode
+      };
+    }
+    if (isGradient(paint)) {
+      return {
+        type: paint.type,
+        opacity: (_c = paint.opacity) != null ? _c : 1,
+        visible: paint.visible !== false,
+        blendMode: paint.blendMode,
+        stops: paint.gradientStops.map((stop) => ({
+          position: stop.position,
+          color: rgbaToHex(stop.color)
+        })),
+        gradientTransform: paint.gradientTransform,
+        cssAngle: paint.type === "GRADIENT_LINEAR" ? gradientCssAngle(paint.gradientTransform) : void 0,
+        css: gradientCssValue(paint)
+      };
+    }
+    if (paint.type === "IMAGE") {
+      return {
+        type: "IMAGE",
+        opacity: (_d = paint.opacity) != null ? _d : 1,
+        visible: paint.visible !== false,
+        blendMode: paint.blendMode,
+        // 同一张图在不同节点上 hash 相同，可直接用于去重/缓存
+        imageHash: (_e = paint.imageHash) != null ? _e : null,
+        scaleMode: paint.scaleMode,
+        imageTransform: paint.imageTransform,
+        rotation: paint.rotation,
+        scalingFactor: paint.scalingFactor,
+        filters: paint.filters
+      };
+    }
+    return {
+      type: paint.type,
+      opacity: (_f = paint.opacity) != null ? _f : 1,
+      visible: paint.visible !== false,
+      blendMode: "blendMode" in paint ? paint.blendMode : void 0
+    };
+  };
+  var serializeEffect = (effect) => {
+    const base = {
+      type: effect.type,
+      visible: effect.visible !== false
+    };
+    if (effect.type === "DROP_SHADOW" || effect.type === "INNER_SHADOW") {
+      const shadow = effect;
+      return __spreadProps(__spreadValues({}, base), {
+        radius: shadow.radius,
+        color: rgbaToHex(shadow.color),
+        offset: { x: shadow.offset.x, y: shadow.offset.y },
+        spread: shadow.spread,
+        blendMode: shadow.blendMode
+      });
+    }
+    if (effect.type === "LAYER_BLUR" || effect.type === "BACKGROUND_BLUR") {
+      const blur = effect;
+      return __spreadProps(__spreadValues({}, base), { radius: blur.radius });
+    }
+    return base;
+  };
+
+  // src/bridge/styles.ts
+  var safeStyleName = async (id) => {
+    if (!id) return void 0;
+    try {
+      const style = await figma.getStyleByIdAsync(id);
+      return style ? style.name : void 0;
+    } catch (e) {
+      return void 0;
+    }
+  };
+  var serializeTextStyle = (node) => {
+    const out = {};
+    const pick = (key) => {
+      const v = node[key];
+      if (v !== figma.mixed) out[key] = v;
+      else out[key] = "mixed";
+    };
+    pick("fontSize");
+    pick("fontName");
+    pick("fontWeight");
+    pick("lineHeight");
+    pick("letterSpacing");
+    pick("textAlignHorizontal");
+    pick("textAlignVertical");
+    pick("textCase");
+    pick("textDecoration");
+    out.characters = node.characters;
+    out.textAutoResize = node.textAutoResize;
+    try {
+      const segments = node.getStyledTextSegments([
+        "fontName",
+        "fontSize",
+        "fontWeight",
+        "lineHeight",
+        "letterSpacing",
+        "fills"
+      ]);
+      out.segments = segments.map((s) => ({
+        characters: s.characters,
+        start: s.start,
+        end: s.end,
+        fontName: s.fontName,
+        fontSize: s.fontSize,
+        fontWeight: s.fontWeight,
+        lineHeight: s.lineHeight,
+        letterSpacing: s.letterSpacing,
+        fills: s.fills.filter((p) => p.visible !== false).map((p) => {
+          var _a;
+          return p.type === "SOLID" ? rgbaToHex(p.color, (_a = p.opacity) != null ? _a : 1) : p.type;
+        })
+      }));
+    } catch (e) {
+    }
+    return out;
+  };
+  var readNodeStyles = async (node) => {
+    const styles = {};
+    if ("fills" in node && node.fills !== figma.mixed) {
+      styles.fills = node.fills.map(serializePaint);
+    }
+    if ("strokes" in node) {
+      styles.strokes = node.strokes.map(serializePaint);
+    }
+    if ("strokeWeight" in node) {
+      if (node.strokeWeight === figma.mixed) {
+        const sides = node;
+        styles.strokeWeight = "mixed";
+        styles.strokeTopWeight = sides.strokeTopWeight;
+        styles.strokeRightWeight = sides.strokeRightWeight;
+        styles.strokeBottomWeight = sides.strokeBottomWeight;
+        styles.strokeLeftWeight = sides.strokeLeftWeight;
+      } else {
+        styles.strokeWeight = node.strokeWeight;
+      }
+    }
+    if ("strokeAlign" in node) styles.strokeAlign = node.strokeAlign;
+    if ("strokeCap" in node) styles.strokeCap = node.strokeCap;
+    if ("strokeJoin" in node) styles.strokeJoin = node.strokeJoin;
+    if ("dashPattern" in node && node.dashPattern.length > 0) {
+      styles.strokeDashes = node.dashPattern;
+    }
+    if ("cornerRadius" in node) {
+      styles.cornerRadius = node.cornerRadius === figma.mixed ? "mixed" : node.cornerRadius;
+    }
+    if ("topLeftRadius" in node) {
+      styles.topLeftRadius = node.topLeftRadius;
+      styles.topRightRadius = node.topRightRadius;
+      styles.bottomLeftRadius = node.bottomLeftRadius;
+      styles.bottomRightRadius = node.bottomRightRadius;
+    }
+    if ("effects" in node) {
+      styles.effects = node.effects.map(serializeEffect);
+    }
+    if ("opacity" in node) styles.opacity = node.opacity;
+    if ("blendMode" in node) styles.blendMode = node.blendMode;
+    if ("clipsContent" in node) styles.clipsContent = node.clipsContent;
+    if ("isMask" in node) styles.isMask = node.isMask;
+    const fillStyleId = "fillStyleId" in node ? node.fillStyleId : "";
+    if (typeof fillStyleId === "string" && fillStyleId) {
+      styles.fillStyleId = fillStyleId;
+      styles.fillStyleName = await safeStyleName(fillStyleId);
+    }
+    const strokeStyleId = "strokeStyleId" in node ? node.strokeStyleId : "";
+    if (typeof strokeStyleId === "string" && strokeStyleId) {
+      styles.strokeStyleId = strokeStyleId;
+      styles.strokeStyleName = await safeStyleName(strokeStyleId);
+    }
+    const effectStyleId = "effectStyleId" in node ? node.effectStyleId : "";
+    if (typeof effectStyleId === "string" && effectStyleId) {
+      styles.effectStyleId = effectStyleId;
+      styles.effectStyleName = await safeStyleName(effectStyleId);
+    }
+    if (node.type === "TEXT") {
+      styles.text = serializeTextStyle(node);
+      const textStyleId = node.textStyleId;
+      if (typeof textStyleId === "string" && textStyleId) {
+        styles.textStyleId = textStyleId;
+        styles.textStyleName = await safeStyleName(textStyleId);
+      }
+    }
+    if ("rotation" in node && node.rotation) styles.rotation = node.rotation;
+    if ("layoutMode" in node && node.layoutMode !== "NONE") {
+      const frame = node;
+      styles.autoLayout = {
+        layoutMode: frame.layoutMode,
+        itemSpacing: frame.itemSpacing,
+        padding: {
+          top: frame.paddingTop,
+          right: frame.paddingRight,
+          bottom: frame.paddingBottom,
+          left: frame.paddingLeft
+        },
+        primaryAxisAlignItems: frame.primaryAxisAlignItems,
+        counterAxisAlignItems: frame.counterAxisAlignItems,
+        layoutSizingHorizontal: frame.layoutSizingHorizontal,
+        layoutSizingVertical: frame.layoutSizingVertical
+      };
+    }
+    return styles;
+  };
+  var readNodesStyles = async (nodes, options = {}) => {
+    var _a;
+    const depth = Math.max(0, (_a = options.depth) != null ? _a : 0);
+    const out = [];
+    const walk = async (node, level) => {
+      let styles;
+      try {
+        styles = await readNodeStyles(node);
+      } catch (e) {
+        styles = { error: e instanceof Error ? e.message : String(e) };
+      }
+      const box = node.absoluteBoundingBox;
+      out.push({
+        id: node.id,
+        name: node.name,
+        type: node.type,
+        parentId: node.parent ? node.parent.id : null,
+        box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
+        styles
+      });
+      if (level >= depth || !("children" in node)) return;
+      for (const child of node.children) {
+        await walk(child, level + 1);
+      }
+    };
+    for (const node of nodes) await walk(node, 0);
+    return out;
+  };
+
+  // src/bridge/images.ts
+  var MIME = {
+    PNG: "image/png",
+    JPG: "image/jpeg",
+    SVG: "image/svg+xml"
+  };
+  var LONG_IMAGE_RATIO = 4;
+  var DEFAULT_SLICE_HEIGHT = 1200;
+  var DEFAULT_MAX_SLICES = 8;
+  var toBase64 = (bytes) => {
+    const api = globalThis.figma;
+    if (api && typeof api.base64Encode === "function") {
+      return api.base64Encode(bytes);
+    }
+    const buf = globalThis.Buffer;
+    if (buf) return buf.from(bytes).toString("base64");
+    throw new Error("\u5F53\u524D\u73AF\u5883\u4E0D\u652F\u6301 base64 \u7F16\u7801");
+  };
+  var clampScale = (value) => Math.max(0.01, Math.min(4, value));
+  var resolveScale = (box, options) => {
+    var _a;
+    if (!box) return clampScale((_a = options.scale) != null ? _a : 1);
+    const candidates = [];
+    if (typeof options.scale === "number") {
+      candidates.push(clampScale(options.scale));
+    }
+    if (typeof options.maxSize === "number" && options.maxSize > 0) {
+      const longest = Math.max(box.width, box.height);
+      if (longest > options.maxSize) candidates.push(options.maxSize / longest);
+    }
+    if (typeof options.maxWidth === "number" && options.maxWidth > 0) {
+      if (box.width > options.maxWidth) candidates.push(options.maxWidth / box.width);
+    }
+    if (typeof options.maxHeight === "number" && options.maxHeight > 0) {
+      if (box.height > options.maxHeight) {
+        candidates.push(options.maxHeight / box.height);
+      }
+    }
+    if (candidates.length === 0) return 1;
+    return clampScale(Math.min(...candidates));
+  };
+  var buildSettings = (format, scale, quality) => {
+    if (format === "SVG") return { format: "SVG" };
+    const base = { constraint: { type: "SCALE", value: scale } };
+    if (format === "JPG") {
+      return __spreadValues(__spreadValues({
+        format: "JPG"
+      }, base), typeof quality === "number" ? { quality: Math.max(0, Math.min(1, quality)) } : {});
+    }
+    return __spreadValues({ format: "PNG" }, base);
+  };
+  var exportNodeImage = async (node, options = {}) => {
+    var _a;
+    const format = (_a = options.format) != null ? _a : "PNG";
+    const box = node.absoluteBoundingBox;
+    const scale = resolveScale(box, options);
+    const bytes = await node.exportAsync(
+      buildSettings(format, scale, options.quality)
+    );
+    return {
+      nodeId: node.id,
+      name: node.name,
+      format,
+      mimeType: MIME[format],
+      data: toBase64(bytes),
+      byteLength: bytes.length,
+      width: box ? Math.round(box.width * scale) : null,
+      height: box ? Math.round(box.height * scale) : null,
+      scale
+    };
+  };
+  var exportNodeThumbnail = async (node, options = {}) => {
+    var _a, _b, _c;
+    return exportNodeImage(node, {
+      format: (_a = options.format) != null ? _a : "JPG",
+      maxWidth: (_b = options.maxWidth) != null ? _b : 512,
+      maxHeight: options.maxHeight,
+      maxSize: options.maxSize,
+      quality: (_c = options.quality) != null ? _c : 0.8,
+      scale: options.scale
+    });
+  };
+  var exportNodeSlices = async (node, options = {}) => {
+    var _a, _b, _c, _d, _e;
+    const box = node.absoluteBoundingBox;
+    if (!box) return [await exportNodeImage(node, options)];
+    const ratio = box.height / Math.max(1, box.width);
+    if (ratio < LONG_IMAGE_RATIO) {
+      return [await exportNodeImage(node, options)];
+    }
+    const format = (_a = options.format) != null ? _a : "JPG";
+    const sliceHeight = Math.max(
+      100,
+      Math.round((_b = options.sliceHeight) != null ? _b : DEFAULT_SLICE_HEIGHT)
+    );
+    const total = Math.min(
+      (_c = options.maxSlices) != null ? _c : DEFAULT_MAX_SLICES,
+      Math.ceil(box.height / sliceHeight)
+    );
+    const step = Math.ceil(box.height / total);
+    const scale = resolveScale(
+      { width: box.width, height: step },
+      { maxWidth: (_d = options.maxWidth) != null ? _d : 750, scale: options.scale }
+    );
+    const slices = [];
+    for (let i = 0; i < total; i++) {
+      const from = i * step;
+      const to = Math.min(from + step, box.height);
+      const visibleHeight = to - from;
+      const viewport = figma.createFrame();
+      viewport.name = `ni-slice-${node.id}-${i}`;
+      viewport.resize(box.width, visibleHeight);
+      viewport.clipsContent = true;
+      viewport.fills = [];
+      let clone = null;
+      try {
+        clone = node.clone();
+        viewport.appendChild(clone);
+        clone.x = 0;
+        clone.y = -from;
+        const bytes = await viewport.exportAsync(
+          buildSettings(format, scale, (_e = options.quality) != null ? _e : 0.8)
+        );
+        slices.push({
+          nodeId: node.id,
+          name: `${node.name} [${i + 1}/${total}]`,
+          format,
+          mimeType: MIME[format],
+          data: toBase64(bytes),
+          byteLength: bytes.length,
+          width: Math.round(box.width * scale),
+          height: Math.round(visibleHeight * scale),
+          scale,
+          slice: { index: i, total, from, to }
+        });
+      } finally {
+        if (clone) clone.remove();
+        viewport.remove();
+      }
+    }
+    return slices;
+  };
+  var exportNodesImages = async (nodes, options = {}) => {
+    const images = [];
+    const errors = [];
+    for (const node of nodes) {
+      try {
+        images.push(
+          options.thumbnail ? await exportNodeThumbnail(node, options) : await exportNodeImage(node, options)
+        );
+      } catch (e) {
+        errors.push({
+          nodeId: node.id,
+          name: node.name,
+          error: e instanceof Error ? e.message : String(e)
+        });
+      }
+    }
+    return { images, errors };
+  };
+
   // src/bridge/ops.ts
   var fail = (message) => {
     throw new Error(message);
@@ -654,6 +1076,86 @@
         const removed = summarize(node);
         node.remove();
         return { removed };
+      },
+      // ---- 样式读取 ----
+      /** 单节点完整样式：填充/渐变/圆角/描边/阴影/文字排版/样式库引用 */
+      async getNodeStyles(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const styles = await readNodeStyles(node);
+        const box = node.absoluteBoundingBox;
+        return {
+          id: node.id,
+          name: node.name,
+          type: node.type,
+          parentId: node.parent ? node.parent.id : null,
+          box: box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null,
+          styles
+        };
+      },
+      /** 批量样式：一次拿一整棵子树的样式，depth 控制下钻层数 */
+      async getNodesStyles(args) {
+        var _a;
+        const ids = args.nodeIds || [];
+        const single = str(args, "nodeId");
+        const targetIds = ids.length > 0 ? ids : single ? [single] : [];
+        if (targetIds.length === 0) return fail("\u9700\u8981 nodeId \u6216 nodeIds");
+        const nodes = await Promise.all(targetIds.map((id) => getNode(id)));
+        const items = await readNodesStyles(nodes, { depth: (_a = num(args, "depth")) != null ? _a : 0 });
+        return { count: items.length, items };
+      },
+      // ---- 图像导出 ----
+      /** 单节点导出为图片，返回 base64（不含 data: 前缀） */
+      async exportNodeImage(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const format = str(args, "format");
+        return exportNodeImage(node, {
+          format: format === "JPG" || format === "SVG" || format === "PNG" ? format : void 0,
+          scale: num(args, "scale"),
+          maxSize: num(args, "maxSize"),
+          maxWidth: num(args, "maxWidth"),
+          maxHeight: num(args, "maxHeight"),
+          quality: num(args, "quality")
+        });
+      },
+      /** 缩略图：默认 JPG、宽度上限 512，适合让模型判断"这是什么" */
+      async exportNodeThumbnail(args) {
+        const node = await getNode(str(args, "nodeId"));
+        return exportNodeThumbnail(node, {
+          maxWidth: num(args, "maxWidth"),
+          maxHeight: num(args, "maxHeight"),
+          maxSize: num(args, "maxSize"),
+          quality: num(args, "quality")
+        });
+      },
+      /** 长图切片：每片保持可读宽度，供模型看清文字细节 */
+      async exportNodeSlices(args) {
+        const node = await getNode(str(args, "nodeId"));
+        const format = str(args, "format");
+        return {
+          slices: await exportNodeSlices(node, {
+            format: format === "JPG" || format === "SVG" || format === "PNG" ? format : void 0,
+            maxWidth: num(args, "maxWidth"),
+            sliceHeight: num(args, "sliceHeight"),
+            maxSlices: num(args, "maxSlices"),
+            quality: num(args, "quality")
+          })
+        };
+      },
+      /** 批量导出：一次任务出多张图，减少往返 */
+      async exportNodesImages(args) {
+        const ids = args.nodeIds || [];
+        if (ids.length === 0) return fail("nodeIds \u4E0D\u80FD\u4E3A\u7A7A");
+        const nodes = await Promise.all(ids.map((id) => getNode(id)));
+        const format = str(args, "format");
+        return exportNodesImages(nodes, {
+          thumbnail: Boolean(args.thumbnail),
+          format: format === "JPG" || format === "SVG" || format === "PNG" ? format : void 0,
+          scale: num(args, "scale"),
+          maxSize: num(args, "maxSize"),
+          maxWidth: num(args, "maxWidth"),
+          maxHeight: num(args, "maxHeight"),
+          quality: num(args, "quality")
+        });
       }
     };
     return ops;
@@ -686,7 +1188,13 @@
     "getFileInfo",
     "getSelection",
     "getPageTree",
-    "getNode"
+    "getNode",
+    "getNodeStyles",
+    "getNodesStyles",
+    "exportNodeImage",
+    "exportNodeThumbnail",
+    "exportNodeSlices",
+    "exportNodesImages"
   ]);
   var createBridge = (hooks = {}) => {
     const ops = createOps();
@@ -980,84 +1488,11 @@
   function shouldBakeAllShapeFrame(node) {
     return isAllShapeOrVisualFrame(node, 2);
   }
-  function rgbaToHex(color, opacity = 1) {
-    const a = "a" in color ? color.a : opacity;
-    const toHex = (n) => Math.round(n * 255).toString(16).padStart(2, "0");
-    const rgb = `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`;
-    if (a >= 1) return rgb.toUpperCase();
-    return `${rgb}${toHex(a)}`.toUpperCase();
+  function serializePaint2(paint) {
+    return serializePaint(paint);
   }
-  function gradientTransformToCssAngle(transform) {
-    const a = transform[0][0];
-    const b = transform[1][0];
-    const radians = Math.atan2(b, a);
-    const deg = radians * 180 / Math.PI + 90;
-    return Math.round((deg % 360 + 360) % 360);
-  }
-  function serializePaint(paint) {
-    var _a, _b, _c, _d, _e;
-    if (paint.type === "SOLID") {
-      return {
-        type: "SOLID",
-        color: rgbaToHex(paint.color, (_a = paint.opacity) != null ? _a : 1),
-        opacity: (_b = paint.opacity) != null ? _b : 1,
-        visible: paint.visible !== false,
-        blendMode: paint.blendMode
-      };
-    }
-    if (paint.type === "GRADIENT_LINEAR" || paint.type === "GRADIENT_RADIAL" || paint.type === "GRADIENT_ANGULAR" || paint.type === "GRADIENT_DIAMOND") {
-      const gradientTransform = paint.gradientTransform;
-      return {
-        type: paint.type,
-        opacity: (_c = paint.opacity) != null ? _c : 1,
-        visible: paint.visible !== false,
-        blendMode: paint.blendMode,
-        stops: paint.gradientStops.map((stop) => ({
-          position: stop.position,
-          color: rgbaToHex(stop.color)
-        })),
-        gradientTransform,
-        cssAngle: paint.type === "GRADIENT_LINEAR" ? gradientTransformToCssAngle(gradientTransform) : void 0
-      };
-    }
-    if (paint.type === "IMAGE") {
-      return {
-        type: "IMAGE",
-        opacity: (_d = paint.opacity) != null ? _d : 1,
-        visible: paint.visible !== false,
-        blendMode: paint.blendMode,
-        scaleMode: paint.scaleMode,
-        imageHash: paint.imageHash,
-        imageTransform: paint.imageTransform,
-        rotation: paint.rotation,
-        scalingFactor: paint.scalingFactor
-      };
-    }
-    return {
-      type: paint.type,
-      opacity: (_e = paint.opacity) != null ? _e : 1,
-      visible: paint.visible !== false,
-      blendMode: "blendMode" in paint ? paint.blendMode : void 0
-    };
-  }
-  function serializeEffect(effect) {
-    const base = {
-      type: effect.type,
-      visible: effect.visible !== false
-    };
-    if (effect.type === "DROP_SHADOW" || effect.type === "INNER_SHADOW") {
-      return __spreadProps(__spreadValues({}, base), {
-        radius: effect.radius,
-        color: rgbaToHex(effect.color),
-        offset: { x: effect.offset.x, y: effect.offset.y },
-        spread: effect.spread,
-        blendMode: effect.blendMode
-      });
-    }
-    if (effect.type === "LAYER_BLUR" || effect.type === "BACKGROUND_BLUR") {
-      return __spreadProps(__spreadValues({}, base), { radius: effect.radius });
-    }
-    return base;
+  function serializeEffect2(effect) {
+    return serializeEffect(effect);
   }
   function getLayoutInfo(node) {
     const layout = {
@@ -1261,10 +1696,10 @@
   async function getStylesInfo(node) {
     const styles = {};
     if ("fills" in node && node.fills !== figma.mixed) {
-      styles.fills = node.fills.map(serializePaint);
+      styles.fills = node.fills.map(serializePaint2);
     }
     if ("strokes" in node) {
-      styles.strokes = node.strokes.map(serializePaint);
+      styles.strokes = node.strokes.map(serializePaint2);
     }
     if ("strokeWeight" in node) {
       if (node.strokeWeight === figma.mixed) {
@@ -1291,7 +1726,7 @@
       styles.bottomRightRadius = node.bottomRightRadius;
     }
     if ("effects" in node) {
-      styles.effects = node.effects.map(serializeEffect);
+      styles.effects = node.effects.map(serializeEffect2);
     }
     if ("fillStyleId" in node && typeof node.fillStyleId === "string") {
       styles.fillStyleId = node.fillStyleId || void 0;
@@ -1347,7 +1782,7 @@
         characters: seg.characters,
         start: seg.start,
         end: seg.end,
-        fills: (seg.fills || []).map(serializePaint),
+        fills: (seg.fills || []).map(serializePaint2),
         fontSize: seg.fontSize,
         fontName: seg.fontName,
         fontWeight: normalizeFontWeight(seg.fontWeight)

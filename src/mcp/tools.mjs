@@ -64,6 +64,112 @@ const defs = [
     input: input({nodeId, depth: num('展开层数，默认 2')}, ['nodeId']),
   },
   {
+    name: 'figma_get_node_styles',
+    op: 'getNodeStyles',
+    description:
+      '读取节点完整样式：填充/渐变(含 CSS 角度与色标)/圆角(含四角)/' +
+      '描边(含虚线、四边宽度)/阴影模糊/透明混合/文字排版(含分段字体)/' +
+      '样式库引用名/Auto Layout。纯读取，不导出像素',
+    input: input({nodeId}, ['nodeId']),
+  },
+  {
+    name: 'figma_get_nodes_styles',
+    op: 'getNodesStyles',
+    description:
+      '批量读取样式，一次拿到整棵子树的样式。depth=0 只读给定节点，' +
+      'depth>0 会向下展开。比逐个调用 figma_get_node_styles 快得多',
+    input: input({
+      nodeId: str('单个节点 id'),
+      nodeIds: {
+        type: 'array',
+        items: {type: 'string'},
+        description: '多个节点 id',
+      },
+      depth: num('向下展开层数，默认 0'),
+    }),
+  },
+  {
+    name: 'figma_export_node_image',
+    op: 'exportNodeImage',
+    description:
+      '把节点导出为图片，返回 base64（不含 data: 前缀）与字节数。' +
+      '用 maxSize 限制长边像素可显著减小体积；大图建议先落盘再读',
+    input: input(
+      {
+        nodeId,
+        format: {
+          type: 'string',
+          enum: ['PNG', 'JPG', 'SVG'],
+          description: '默认 PNG',
+        },
+        scale: num('缩放倍数，1=原始像素，上限 4'),
+        maxSize: num('限制最长边像素，优先于 scale，不放大'),
+        quality: num('JPG 质量 0~1'),
+      },
+      ['nodeId'],
+    ),
+  },
+  {
+    name: 'figma_export_node_thumbnail',
+    op: 'exportNodeThumbnail',
+    description:
+      '导出缩略图：默认 JPG、宽度上限 512（按宽度约束，长图不会被压窄）。' +
+      '适合判断"这个节点是什么"。要读文字细节请用 figma_export_node_slices',
+    input: input(
+      {
+        nodeId,
+        maxWidth: num('宽度像素上限，默认 512'),
+        maxHeight: num('高度像素上限，可选'),
+        quality: num('JPG 质量 0~1，默认 0.8'),
+      },
+      ['nodeId'],
+    ),
+  },
+  {
+    name: 'figma_export_node_slices',
+    op: 'exportNodeSlices',
+    description:
+      '长图切片导出：把超长节点按高度切成多片，每片保持可读宽度，' +
+      '用于看清文字细节。高宽比 < 4 的节点会自动退化为单张导出',
+    input: input(
+      {
+        nodeId,
+        maxWidth: num('每片宽度像素上限，默认 750'),
+        sliceHeight: num('每片覆盖的原图高度像素，默认 1200'),
+        maxSlices: num('最多切几片，默认 8'),
+        format: {
+          type: 'string',
+          enum: ['PNG', 'JPG'],
+          description: '默认 JPG',
+        },
+        quality: num('JPG 质量 0~1，默认 0.8'),
+      },
+      ['nodeId'],
+    ),
+  },
+  {
+    name: 'figma_export_nodes_images',
+    op: 'exportNodesImages',
+    description:
+      '批量导出多个节点为图片，一次任务完成，避免逐张往返。' +
+      'thumbnail=true 时按缩略图导出',
+    input: input(
+      {
+        nodeIds: {
+          type: 'array',
+          items: {type: 'string'},
+          description: '节点 id 列表',
+        },
+        thumbnail: bool('true=按缩略图导出（默认 JPG/512）'),
+        format: {type: 'string', enum: ['PNG', 'JPG', 'SVG']},
+        scale: num('缩放倍数'),
+        maxSize: num('长边像素上限'),
+        quality: num('JPG 质量 0~1'),
+      },
+      ['nodeIds'],
+    ),
+  },
+  {
     name: 'figma_group_nodes',
     op: 'groupNodes',
     description: '把同一父节点下的若干图层分组。必须显式给 nodeIds',

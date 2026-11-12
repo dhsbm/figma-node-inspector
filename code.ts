@@ -17,6 +17,12 @@ import {
 import {resolveAutoLineHeightPx} from './scripts/lib/figma-line-height.mjs'
 import {attachRootRelativeCoords} from './scripts/lib/root-relative-layout.mjs'
 import {createBridge} from './src/bridge/index'
+import {
+  gradientCssAngle as sharedGradientCssAngle,
+  rgbaToHex as sharedRgbaToHex,
+  serializeEffect as sharedSerializeEffect,
+  serializePaint as sharedSerializePaint,
+} from './src/shared/paint'
 
 /** PingFang Regular 等在 Figma 常报 300；JSON/CSS 统一下限 400 */
 const MIN_FONT_WEIGHT = 400
@@ -736,108 +742,26 @@ type ExportedPng = {
 }
 
 function rgbaToHex(color: RGB | RGBA, opacity = 1): string {
-  const a = 'a' in color ? color.a : opacity
-  const toHex = (n: number) =>
-    Math.round(n * 255)
-      .toString(16)
-      .padStart(2, '0')
-  const rgb = `#${toHex(color.r)}${toHex(color.g)}${toHex(color.b)}`
-  if (a >= 1) return rgb.toUpperCase()
-  return `${rgb}${toHex(a)}`.toUpperCase()
+  // 实现统一在 src/shared/paint.ts，避免与桥接各写一份而分叉
+  return sharedRgbaToHex(color, opacity)
 }
 
 /**
  * Figma gradientTransform 映射到近似 CSS linear-gradient 角度（deg）。
- * Transform 为 [[a, c, tx], [b, d, ty]]，梯度默认沿局部 +x。
+ * 实现见 src/shared/paint.ts，与 MCP 侧共用同一套算法。
  */
 function gradientTransformToCssAngle(transform: TransformMatrix): number {
-  const a = transform[0][0]
-  const b = transform[1][0]
-  const radians = Math.atan2(b, a)
-  // CSS：0deg 向上，顺时针；Figma 局部 +x 对应 CSS 90deg
-  const deg = (radians * 180) / Math.PI + 90
-  return Math.round(((deg % 360) + 360) % 360)
+  return sharedGradientCssAngle(transform)
 }
 
 function serializePaint(paint: Paint): SerializedPaint {
-  if (paint.type === 'SOLID') {
-    return {
-      type: 'SOLID',
-      color: rgbaToHex(paint.color, paint.opacity ?? 1),
-      opacity: paint.opacity ?? 1,
-      visible: paint.visible !== false,
-      blendMode: paint.blendMode,
-    }
-  }
-
-  if (
-    paint.type === 'GRADIENT_LINEAR' ||
-    paint.type === 'GRADIENT_RADIAL' ||
-    paint.type === 'GRADIENT_ANGULAR' ||
-    paint.type === 'GRADIENT_DIAMOND'
-  ) {
-    const gradientTransform = paint.gradientTransform as TransformMatrix
-    return {
-      type: paint.type,
-      opacity: paint.opacity ?? 1,
-      visible: paint.visible !== false,
-      blendMode: paint.blendMode,
-      stops: paint.gradientStops.map((stop) => ({
-        position: stop.position,
-        color: rgbaToHex(stop.color),
-      })),
-      gradientTransform,
-      cssAngle:
-        paint.type === 'GRADIENT_LINEAR'
-          ? gradientTransformToCssAngle(gradientTransform)
-          : undefined,
-    }
-  }
-
-  if (paint.type === 'IMAGE') {
-    return {
-      type: 'IMAGE',
-      opacity: paint.opacity ?? 1,
-      visible: paint.visible !== false,
-      blendMode: paint.blendMode,
-      scaleMode: paint.scaleMode,
-      imageHash: paint.imageHash,
-      imageTransform: paint.imageTransform as TransformMatrix | undefined,
-      rotation: paint.rotation,
-      scalingFactor: paint.scalingFactor,
-    }
-  }
-
-  return {
-    type: paint.type,
-    opacity: paint.opacity ?? 1,
-    visible: paint.visible !== false,
-    blendMode: 'blendMode' in paint ? paint.blendMode : undefined,
-  }
+  // 单一定义在 src/shared/paint.ts，MCP 侧读到的与导出 JSON 必然一致
+  return sharedSerializePaint(paint) as SerializedPaint
 }
 
 function serializeEffect(effect: Effect): SerializedEffect {
-  const base: SerializedEffect = {
-    type: effect.type,
-    visible: effect.visible !== false,
-  }
-
-  if (effect.type === 'DROP_SHADOW' || effect.type === 'INNER_SHADOW') {
-    return {
-      ...base,
-      radius: effect.radius,
-      color: rgbaToHex(effect.color),
-      offset: {x: effect.offset.x, y: effect.offset.y},
-      spread: effect.spread,
-      blendMode: effect.blendMode,
-    }
-  }
-
-  if (effect.type === 'LAYER_BLUR' || effect.type === 'BACKGROUND_BLUR') {
-    return {...base, radius: effect.radius}
-  }
-
-  return base
+  // 同上：定义在 src/shared/paint.ts
+  return sharedSerializeEffect(effect) as SerializedEffect
 }
 
 function getLayoutInfo(node: SceneNode): NodeInfo['layout'] {

@@ -31,6 +31,12 @@ const READ_ONLY_OPS = new Set([
   'getSelection',
   'getPageTree',
   'getNode',
+  'getNodeStyles',
+  'getNodesStyles',
+  'exportNodeImage',
+  'exportNodeThumbnail',
+  'exportNodeSlices',
+  'exportNodesImages',
 ])
 
 export const createBridge = (hooks: BridgeHooks = {}) => {

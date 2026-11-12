@@ -9,6 +9,8 @@
  */
 
 import {planMove, planReorder} from './layer-order.mjs'
+import {readNodeStyles, readNodesStyles} from './styles'
+import {exportNodeImage, exportNodeSlices, exportNodeThumbnail, exportNodesImages} from './images'
 
 export type BridgeArgs = Record<string, unknown>
 
@@ -567,6 +569,105 @@ export const createOps = () => {
       const removed = summarize(node)
       node.remove()
       return {removed}
+    },
+
+    // ---- 样式读取 ----
+
+    /** 单节点完整样式：填充/渐变/圆角/描边/阴影/文字排版/样式库引用 */
+    async getNodeStyles(args) {
+      const node = await getNode(str(args, 'nodeId'))
+      const styles = await readNodeStyles(node)
+      const box = node.absoluteBoundingBox
+      return {
+        id: node.id,
+        name: node.name,
+        type: node.type,
+        parentId: node.parent ? node.parent.id : null,
+        box: box
+          ? {x: box.x, y: box.y, width: box.width, height: box.height}
+          : null,
+        styles,
+      }
+    },
+
+    /** 批量样式：一次拿一整棵子树的样式，depth 控制下钻层数 */
+    async getNodesStyles(args) {
+      const ids = (args.nodeIds as string[] | undefined) || []
+      const single = str(args, 'nodeId')
+      const targetIds = ids.length > 0 ? ids : single ? [single] : []
+      if (targetIds.length === 0) return fail('需要 nodeId 或 nodeIds')
+
+      const nodes = await Promise.all(targetIds.map((id) => getNode(id)))
+      const items = await readNodesStyles(nodes, {depth: num(args, 'depth') ?? 0})
+      return {count: items.length, items}
+    },
+
+    // ---- 图像导出 ----
+
+    /** 单节点导出为图片，返回 base64（不含 data: 前缀） */
+    async exportNodeImage(args) {
+      const node = await getNode(str(args, 'nodeId'))
+      const format = str(args, 'format')
+      return exportNodeImage(node, {
+        format:
+          format === 'JPG' || format === 'SVG' || format === 'PNG'
+            ? format
+            : undefined,
+        scale: num(args, 'scale'),
+        maxSize: num(args, 'maxSize'),
+        maxWidth: num(args, 'maxWidth'),
+        maxHeight: num(args, 'maxHeight'),
+        quality: num(args, 'quality'),
+      })
+    },
+
+    /** 缩略图：默认 JPG、宽度上限 512，适合让模型判断"这是什么" */
+    async exportNodeThumbnail(args) {
+      const node = await getNode(str(args, 'nodeId'))
+      return exportNodeThumbnail(node, {
+        maxWidth: num(args, 'maxWidth'),
+        maxHeight: num(args, 'maxHeight'),
+        maxSize: num(args, 'maxSize'),
+        quality: num(args, 'quality'),
+      })
+    },
+
+    /** 长图切片：每片保持可读宽度，供模型看清文字细节 */
+    async exportNodeSlices(args) {
+      const node = await getNode(str(args, 'nodeId'))
+      const format = str(args, 'format')
+      return {
+        slices: await exportNodeSlices(node, {
+          format:
+            format === 'JPG' || format === 'SVG' || format === 'PNG'
+              ? format
+              : undefined,
+          maxWidth: num(args, 'maxWidth'),
+          sliceHeight: num(args, 'sliceHeight'),
+          maxSlices: num(args, 'maxSlices'),
+          quality: num(args, 'quality'),
+        }),
+      }
+    },
+
+    /** 批量导出：一次任务出多张图，减少往返 */
+    async exportNodesImages(args) {
+      const ids = (args.nodeIds as string[] | undefined) || []
+      if (ids.length === 0) return fail('nodeIds 不能为空')
+      const nodes = await Promise.all(ids.map((id) => getNode(id)))
+      const format = str(args, 'format')
+      return exportNodesImages(nodes, {
+        thumbnail: Boolean(args.thumbnail),
+        format:
+          format === 'JPG' || format === 'SVG' || format === 'PNG'
+            ? format
+            : undefined,
+        scale: num(args, 'scale'),
+        maxSize: num(args, 'maxSize'),
+        maxWidth: num(args, 'maxWidth'),
+        maxHeight: num(args, 'maxHeight'),
+        quality: num(args, 'quality'),
+      })
     },
   }
 
